@@ -246,9 +246,14 @@ jobs:
           PKG: ${{ steps.pkg.outputs.pkg }}
           OUT: ${{ steps.pkg.outputs.out }}
         run: |
+          # Mesure seulement : GitHub lance bash avec -e et pipefail ; un grep sans correspondance
+          # (statut 1) ne doit pas interrompre le relevé.
+          set +e
           set -uo pipefail
-          SUMMARY="$GITHUB_STEP_SUMMARY"
-          count() { grep -a -o -- "$1" "$2" | wc -l; }
+          REPORT="$RUNNER_TEMP/evora-garde-fous.md"
+          : > "$REPORT"
+          # Nombre d'occurrences d'un motif dans un fichier (0 si absent). $3 : option de grep.
+          count() { { grep -a -o ${3:-} -- "$1" "$2" || true; } | wc -l; }
           zip_bytes="$(stat -c %s "$OUT/$NAME.zip")"
           zip_sha="$(sha256sum "$OUT/$NAME.zip" | cut -d' ' -f1)"
           {
@@ -267,67 +272,74 @@ jobs:
             echo
             echo "### Garde-fous (mesure, non bloquants)"
             echo
-          } >> "$SUMMARY"
+          } >> "$REPORT"
 
           # 1. Fichiers d'hébergement dans le paquet (attendu : aucun).
           hosting="$(find "$PKG" \( -name '_headers' -o -name '.htaccess' -o -name '*.conf' -o -name 'web.config' \) -print)"
-          n_hosting="$(printf '%s' "$hosting" | grep -c . || true)"
+          n_hosting="$(printf '%s' "$hosting" | { grep -c . || true; })"
           {
             echo "**Fichiers d'hébergement** (_headers, .htaccess, *.conf, web.config) : $n_hosting"
             if [ "$n_hosting" -gt 0 ]; then printf '%s\n' "$hosting" | sed "s|$PKG/|- |"; fi
             echo
-          } >> "$SUMMARY"
+          } >> "$REPORT"
           if [ "$n_hosting" -gt 0 ]; then echo "::warning::$n_hosting fichier(s) d'hébergement dans le paquet"; fi
 
-          # 2. Taille des .wasm (brut, gzip -9, brotli si disponible) et du site.
+          # 2. Taille des .wasm (brut, gzip -9, brotli -q 11 si disponible) et du site.
           {
             echo "**Taille des .wasm**"
             echo
             echo "| Fichier | Brut (octets) | gzip -9 | brotli -q 11 |"
             echo "|---|---|---|---|"
-          } >> "$SUMMARY"
+          } >> "$REPORT"
           while IFS= read -r -d '' w; do
             raw="$(stat -c %s "$w")"
             gz="$(gzip -9 -c "$w" | wc -c)"
             if command -v brotli >/dev/null; then br="$(brotli -q 11 -c "$w" | wc -c)"; else br="n/d"; fi
-            echo "| \`${w#"$PKG"/}\` | $raw | $gz | $br |" >> "$SUMMARY"
-            echo "::notice::${w#"$PKG"/} : $raw octets bruts, $gz en gzip -9"
+            echo "| \`${w#"$PKG"/}\` | $raw | $gz | $br |" >> "$REPORT"
+            echo "::notice::${w#"$PKG"/} : $raw octets bruts, $gz en gzip -9, $br en brotli -q 11"
           done < <(find "$PKG" -name '*.wasm' -print0)
-          echo >> "$SUMMARY"
-          echo "Site complet : $(du -sb "$PKG" | cut -f1) octets ; fichiers : $(find "$PKG" -type f | wc -l)" >> "$SUMMARY"
-          echo >> "$SUMMARY"
+          {
+            echo
+            echo "Site complet : $(du -sb "$PKG" | cut -f1) octets ; fichiers : $(find "$PKG" -type f | wc -l)"
+            echo
+          } >> "$REPORT"
 
           # 3. Marques ArtCraft dans le bundle (mesure de la future cible E1, hors LICENSES/
           #    où la mention en texte simple est permise).
           {
             echo "**Occurrences de marques** (cible E1 : 0 hors LICENSES/)"
             echo
-            echo "| Fichier | ArtCraft | artcraft (casse ignorée) | discord.gg | getartcraft |"
+            echo "| Fichier | ArtCraft | artcraft (casse ignorée) | discord.gg | getartcraft (casse ignorée) |"
             echo "|---|---|---|---|---|"
-          } >> "$SUMMARY"
-          total_site=0
-          total_licences=0
+          } >> "$REPORT"
+          site_ai=0; site_d=0; site_g=0; lic_ai=0
           while IFS= read -r -d '' f; do
             a="$(count 'ArtCraft' "$f")"
-            ai="$(grep -a -o -i -- 'artcraft' "$f" | wc -l)"
-            d="$(count 'discord.gg' "$f")"
-            g="$(grep -a -o -i -- 'getartcraft' "$f" | wc -l)"
+            ai="$(count 'artcraft' "$f" -i)"
+            d="$(count 'discord.gg' "$f" -F)"
+            g="$(count 'getartcraft' "$f" -i)"
             rel="${f#"$PKG"/}"
             if [ "$((a + ai + d + g))" -gt 0 ]; then
-              echo "| \`$rel\` | $a | $ai | $d | $g |" >> "$SUMMARY"
+              echo "| \`$rel\` | $a | $ai | $d | $g |" >> "$REPORT"
             fi
             case "$rel" in
-              LICENSES/*) total_licences=$((total_licences + ai)) ;;
-              *) total_site=$((total_site + ai)) ;;
+              LICENSES/*) lic_ai=$((lic_ai + ai)) ;;
+              *) site_ai=$((site_ai + ai)); site_d=$((site_d + d)); site_g=$((site_g + g)) ;;
             esac
           done < <(find "$PKG" -type f -print0 | LC_ALL=C sort -z)
           {
             echo
-            echo "Total « artcraft » (casse ignorée) hors LICENSES/ : **$total_site** ; dans LICENSES/ : $total_licences"
-          } >> "$SUMMARY"
-          if [ "$total_site" -gt 0 ]; then
-            echo "::warning::$total_site occurrence(s) de la marque ArtCraft dans le bundle (cible E1 : 0)"
+            echo "Hors LICENSES/ : artcraft **$site_ai**, discord.gg **$site_d**, getartcraft **$site_g** ; dans LICENSES/ : artcraft $lic_ai"
+          } >> "$REPORT"
+          if [ "$site_ai" -gt 0 ]; then
+            echo "::warning::$site_ai occurrence(s) de la marque ArtCraft dans le bundle hors LICENSES/ (cible E1 : 0)"
           fi
+          echo "::notice::garde-fous : hebergement=$n_hosting artcraft_site=$site_ai discord_site=$site_d getartcraft_site=$site_g artcraft_licences=$lic_ai"
+
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          echo "----- résumé du job -----"
+          cat "$REPORT"
+          exit 0
 
       - name: Artefact du run
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
