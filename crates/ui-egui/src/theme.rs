@@ -68,6 +68,8 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    /// Evora (E2): the accent family is Evora's indigo (primary #4F46E5, Tailwind indigo scale)
+    /// instead of upstream's blue (#1B63E0 light, #4B8BF5 dark); neutral greys are unchanged.
     pub fn for_kind(kind: ThemeKind) -> Self {
         match kind {
             ThemeKind::Light => Self {
@@ -85,12 +87,13 @@ impl Tokens {
                 icon: Color32::from_rgb(0x44, 0x44, 0x4B),
                 hover: Color32::from_rgb(0xF0, 0xF0, 0xF3),
                 pressed: Color32::from_rgb(0xE4, 0xE4, 0xE9),
-                selected: Color32::from_rgb(0xE6, 0xEE, 0xFD),
-                accent: Color32::from_rgb(0x1B, 0x63, 0xE0),
-                accent_text: Color32::from_rgb(0x17, 0x55, 0xC4),
-                accent_soft: Color32::from_rgb(0xE3, 0xEC, 0xFD),
+                // Evora (E2): indigo-100, indigo-600 (#4F46E5), indigo-700, indigo-100, indigo-600.
+                selected: Color32::from_rgb(0xE0, 0xE7, 0xFF),
+                accent: Color32::from_rgb(0x4F, 0x46, 0xE5),
+                accent_text: Color32::from_rgb(0x43, 0x38, 0xCA),
+                accent_soft: Color32::from_rgb(0xE0, 0xE7, 0xFF),
                 field: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-                badge_new: Color32::from_rgb(0x1B, 0x63, 0xE0),
+                badge_new: Color32::from_rgb(0x4F, 0x46, 0xE5),
                 page_shadow: Color32::from_black_alpha(34),
                 radius: 6,
             },
@@ -109,12 +112,14 @@ impl Tokens {
                 icon: Color32::from_rgb(0xD4, 0xD4, 0xDA),
                 hover: Color32::from_rgb(0x34, 0x34, 0x3A),
                 pressed: Color32::from_rgb(0x3E, 0x3E, 0x45),
-                selected: Color32::from_rgb(0x23, 0x3A, 0x63),
-                accent: Color32::from_rgb(0x4B, 0x8B, 0xF5),
-                accent_text: Color32::from_rgb(0x8C, 0xB6, 0xFA),
-                accent_soft: Color32::from_rgb(0x24, 0x36, 0x57),
+                // Evora (E2): indigo-900, indigo-500, indigo-300, indigo-900, indigo-500 (contrast
+                // on the dark greys; Evora's dark mode uses the lighter steps of the same scale).
+                selected: Color32::from_rgb(0x31, 0x2E, 0x81),
+                accent: Color32::from_rgb(0x63, 0x66, 0xF1),
+                accent_text: Color32::from_rgb(0xA5, 0xB4, 0xFC),
+                accent_soft: Color32::from_rgb(0x31, 0x2E, 0x81),
                 field: Color32::from_rgb(0x1E, 0x1E, 0x22),
-                badge_new: Color32::from_rgb(0x3D, 0x7D, 0xEE),
+                badge_new: Color32::from_rgb(0x63, 0x66, 0xF1),
                 page_shadow: Color32::from_black_alpha(120),
                 radius: 6,
             },
