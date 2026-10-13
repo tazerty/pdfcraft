@@ -23,17 +23,21 @@ fn main() {
                 options,
                 Box::new(|cc| {
                     let mut app = PdfCraftApp::new();
+                    let evora_host = query_param("host").as_deref() == Some("evora");
                     // Evora (E9, E10): `?evora-audit=1` (CI smoke test) audits every text drawn.
                     if query_param("evora-audit").as_deref() == Some("1") {
                         cc.egui_ctx.add_plugin(e10::Audit::new(query_param("evora-probe")));
                     }
-                    // Evora (E5): the browser storage is a namespace per Evora account. Settings are kept
-                    // under `evora.pdfcraft.<storageNs>`, the namespace the host sends in `evora:init`
-                    // (HOST-PROTOCOL.md §4.3, §7.7); until it arrives they stay in memory only. Upstream's
-                    // shared keys ("pdfcraft", and "printcraft" from the app's former name), readable by
-                    // every account of the browser, are neither read nor written, and are purged.
-                    app.storage_key = None;
-                    storage_ns::purge_legacy();
+                    // Evora (E5): under the Evora bridge (`?host=evora`) the browser storage is a namespace
+                    // per Evora account, which only `evora:init` opens and only `evora:init` and
+                    // `evora:purge` erase (module `storage_ns`); until then the settings stay in memory,
+                    // and upstream's shared keys are never read. Outside the bridge, upstream's behaviour
+                    // is unchanged: "printcraft" holds settings saved under the app's former name, PrintCraft.
+                    if !evora_host
+                        && let Some(json) = cc.storage.and_then(|s| s.get_string("pdfcraft").or_else(|| s.get_string("printcraft")))
+                    {
+                        app.restore(&json);
+                    }
                     // Evora (E3): `?lang=` and `?theme=` impose the first language and theme, read
                     // after the saved settings so the host's choice wins (HOST-PROTOCOL.md §2.4).
                     if let Some(code) = query_param("lang").and_then(|tag| evora_lang(&tag)) {
@@ -52,11 +56,14 @@ fn main() {
                     // Evora (E4, COL-02): `?host=evora` speaks the Evora host protocol (EHP v1) with the
                     // parent origin that `evora-host.json` admits (module `ehp` below).
                     let events = ehp::Events::default();
-                    if query_param("host").as_deref() == Some("evora") {
+                    let mut gate = None;
+                    if evora_host {
+                        let shared = storage_ns::SharedGate::default();
                         let link = ehp::Link::default();
                         app.host_save = Some(link.save_fn());
                         app.host_dirty = Some(link.dirty_fn());
-                        ehp::connect(link, app.startup_inbox.clone(), events.clone(), cc.egui_ctx.clone());
+                        ehp::connect(link, app.startup_inbox.clone(), events.clone(), shared.clone(), cc.egui_ctx.clone());
+                        gate = Some(shared);
                     }
                     // `?host=parent`: a same-origin page embedding PdfCraft in an iframe (such
                     // as the Nextcloud app) passes files in and takes saves back (`host` below).
@@ -75,7 +82,7 @@ fn main() {
                         app.host_dirty = Some(bridge.dirty_fn());
                         bridge.post_ready();
                     }
-                    Ok(Box::new(EvoraApp { inner: app, events }))
+                    Ok(Box::new(EvoraApp { inner: app, events, gate }))
                 }),
             )
             .await;
@@ -107,16 +114,67 @@ fn warn_before_unload(unsaved: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     }
 }
 
-/// Evora (E5): the engine's browser storage as a namespace per Evora account (`storageNs`, an
-/// opaque HMAC of the account, sent by the host). A namespace, not a partition: any script of the
-/// engine's origin can still list every key; the isolation comes from serving the engine on its
-/// own site (mode B). This engine keeps its settings in localStorage only (no OPFS, no IndexedDB).
+/// Evora (E5): the engine's browser storage under the Evora bridge (`?host=evora`), a namespace per
+/// Evora account. `storageNs`, an opaque HMAC of the account, arrives only in `evora:init`, never in
+/// the URL (HOST-PROTOCOL.md §2.4, §4.3). A namespace, not a partition: any script of the engine's
+/// origin can still list every key; the isolation comes from serving the engine on its own site
+/// (mode B).
+///
+/// What this engine keeps in the browser, as measured in its code: its settings (drawn signatures,
+/// initials, digital IDs, trusted certificates and stamps included) and eframe's UI memory
+/// (`egui_memory_ron`), both in localStorage. No OPFS, no IndexedDB, no Cache Storage, no cookie,
+/// and no recovery store on the web (`RecoveryStore` is desktop only). Under the bridge:
+/// - the settings are written only under `evora.pdfcraft.<storageNs>`, once `evora:init` has given
+///   the namespace and the app has restored them, and eframe's UI memory is never written
+///   ([`Gate`], `EvoraApp::save`);
+/// - `evora:init` erases, before its answer, every other namespace and every key the engine leaves
+///   outside the namespaces on its origin ([`LOOSE`]) (§7.1 step 6, §7.7 b);
+/// - `evora:purge` first seals the gate (no write any more, for the rest of the page's life), then
+///   erases, checks that nothing is left, and only then answers (§7.7 a).
+///
+/// Nothing else erases anything: no URL parameter, no other message, not the start of the page.
+/// Outside the bridge, upstream's behaviour is unchanged.
 #[cfg(target_arch = "wasm32")]
 mod storage_ns {
-    /// Upstream's keys, shared by every account of the browser.
-    const LEGACY: [&str; 2] = ["pdfcraft", "printcraft"];
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     /// Prefix of the namespaced keys.
     const PREFIX: &str = "evora.pdfcraft.";
+    /// The keys this engine writes outside the namespaces on its origin: upstream's shared settings,
+    /// the settings of the app's former name (PrintCraft), and eframe's UI memory.
+    const LOOSE: [&str; 3] = ["pdfcraft", "printcraft", "egui_memory_ron"];
+
+    /// Whether, and where, the settings may be written: shared by the bridge, which opens the gate
+    /// (`evora:init`, once the app has restored the account's settings) and seals it (`evora:purge`),
+    /// and by the app, which asks it on every save. Closed at first; sealed for good.
+    #[derive(Default)]
+    pub struct Gate {
+        key: Option<String>,
+        sealed: bool,
+    }
+
+    pub type SharedGate = Rc<RefCell<Gate>>;
+
+    impl Gate {
+        /// The key the settings may be written under now, if any.
+        pub fn key(&self) -> Option<String> {
+            if self.sealed { None } else { self.key.clone() }
+        }
+
+        /// Allow writing under namespace `ns`, unless a purge has sealed the gate.
+        pub fn open(&mut self, ns: &str) {
+            if !self.sealed {
+                self.key = key(ns);
+            }
+        }
+
+        /// Stop every write, for the rest of the page's life.
+        pub fn seal(&mut self) {
+            self.sealed = true;
+            self.key = None;
+        }
+    }
 
     /// `storageNs` is 64 lowercase hexadecimal digits (HOST-PROTOCOL.md §4.3); anything else is refused.
     pub fn valid(ns: &str) -> bool {
@@ -137,40 +195,44 @@ mod storage_ns {
         storage()?.get_item(&key(ns)?).ok()?
     }
 
-    /// Remove namespace `ns`'s settings (`evora:purge` with `scope: "current"`).
-    pub fn remove(ns: &str) {
-        if let (Some(s), Some(k)) = (storage(), key(ns)) {
-            let _ = s.remove_item(&k);
-        }
-    }
-
-    /// Remove upstream's shared keys.
-    pub fn purge_legacy() {
-        if let Some(s) = storage() {
-            for k in LEGACY {
-                let _ = s.remove_item(k);
+    /// This engine's keys present now (namespaces and loose keys); `None` if they can't be listed.
+    fn engine_keys(s: &web_sys::Storage) -> Option<Vec<String>> {
+        let mut found = Vec::new();
+        for i in 0..s.length().ok()? {
+            let k = s.key(i).ok()??;
+            if k.starts_with(PREFIX) || LOOSE.contains(&k.as_str()) {
+                found.push(k);
             }
         }
+        Some(found)
     }
 
-    /// Remove this engine's namespaced keys except namespace `keep`, and the shared ones.
-    /// `keep: None` removes every namespace (`evora:purge` with `scope: "all"`).
-    pub fn purge(keep: Option<&str>) {
-        purge_legacy();
-        let Some(s) = storage() else { return };
+    /// Remove this engine's keys that `doomed` picks, then check that none is left. `false` when the
+    /// storage can't be reached or listed, or a key survived: the erasure isn't effective.
+    fn erase(doomed: impl Fn(&str) -> bool) -> bool {
+        let Some(s) = storage() else { return false };
+        let Some(before) = engine_keys(&s) else { return false };
+        for k in before.iter().filter(|k| doomed(k.as_str())) {
+            let _ = s.remove_item(k);
+        }
+        engine_keys(&s).is_some_and(|after| !after.iter().any(|k| doomed(k.as_str())))
+    }
+
+    /// `evora:init` (§7.7 b): every key of this engine except namespace `keep`.
+    pub fn purge_except(keep: Option<&str>) -> bool {
         let keep = keep.and_then(key);
-        let mut doomed = Vec::new();
-        for i in 0..s.length().unwrap_or(0) {
-            if let Ok(Some(k)) = s.key(i)
-                && k.starts_with(PREFIX)
-                && Some(&k) != keep.as_ref()
-            {
-                doomed.push(k);
-            }
-        }
-        for k in doomed {
-            let _ = s.remove_item(&k);
-        }
+        erase(|k| keep.as_deref() != Some(k))
+    }
+
+    /// `evora:purge` with `scope: "current"`: namespace `ns` and the keys outside the namespaces.
+    pub fn purge_current(ns: Option<&str>) -> bool {
+        let current = ns.and_then(key);
+        erase(|k| LOOSE.contains(&k) || current.as_deref() == Some(k))
+    }
+
+    /// `evora:purge` with `scope: "all"`: every namespace and the keys outside them.
+    pub fn purge_all() -> bool {
+        erase(|_| true)
     }
 }
 
@@ -513,13 +575,12 @@ mod ehp {
 
     /// What the host asks of the app, applied at the start of the next frame (`EvoraApp::logic`).
     pub enum HostEvent {
-        /// `evora:init`: the settings namespace, then the language (`None`: English), theme and
-        /// author name.
-        Init { storage_ns: String, lang: Option<&'static str>, dark: bool, author: Option<String> },
+        /// `evora:init`: the account's saved settings (read before the other namespaces were
+        /// erased), the namespace the settings may then be written under (`None`: memory only), the
+        /// language (`None`: English), the theme and the author name.
+        Init { settings: Option<String>, storage_ns: Option<String>, lang: Option<&'static str>, dark: bool, author: Option<String> },
         Lang(Option<&'static str>),
         Theme(bool),
-        /// `evora:purge`: the storage is already cleared; the app stops saving settings.
-        Purged,
     }
 
     pub type Events = Rc<RefCell<Vec<HostEvent>>>;
@@ -530,6 +591,8 @@ mod ehp {
         ctx: egui::Context,
         inbox: pdfcraft_ui_egui::Inbox,
         events: Events,
+        /// E5: whether, and where, the app may write its settings (`storage_ns::Gate`).
+        gate: crate::storage_ns::SharedGate,
         ready_id: String,
         initialized: bool,
         caps: Vec<String>,
@@ -603,7 +666,7 @@ mod ehp {
     }
 
     /// Read `evora-host.json`, find the admitted parent, listen, and announce `evora:ready`.
-    pub fn connect(link: Link, inbox: pdfcraft_ui_egui::Inbox, events: Events, ctx: egui::Context) {
+    pub fn connect(link: Link, inbox: pdfcraft_ui_egui::Inbox, events: Events, gate: crate::storage_ns::SharedGate, ctx: egui::Context) {
         wasm_bindgen_futures::spawn_local(async move {
             let Some((window, parent, origin)) = admitted_parent().await else { return };
             let state = Rc::new(RefCell::new(State {
@@ -612,6 +675,7 @@ mod ehp {
                 ctx,
                 inbox,
                 events,
+                gate,
                 ready_id: String::new(),
                 initialized: false,
                 caps: Vec::new(),
@@ -830,10 +894,16 @@ mod ehp {
         st.initialized = true;
         let author = author.filter(|_| st.caps.iter().any(|c| c == "author"));
         let lang = engine_lang.and_then(|l| crate::evora_lang(&l));
-        if st.caps.iter().any(|c| c == "storage.ns") {
-            st.storage_ns = Some(ns.clone());
-        }
-        st.events.borrow_mut().push(HostEvent::Init { storage_ns: st.storage_ns.clone().unwrap_or_default(), lang, dark, author });
+        // E5 (§7.1 step 6, §7.7 b), before the answer: this account's settings are read (only with
+        // `storage.ns`; otherwise the engine keeps nothing), then every other namespace and every
+        // key the engine leaves outside the namespaces is erased and the erasure checked. The app
+        // restores the settings on its next frame and may only then write them, under this
+        // namespace, and only if the erasure was effective; otherwise it stays in memory.
+        st.storage_ns = st.caps.iter().any(|c| c == "storage.ns").then_some(ns);
+        let settings = st.storage_ns.as_deref().and_then(crate::storage_ns::read);
+        let erased = crate::storage_ns::purge_except(st.storage_ns.as_deref());
+        let storage_ns = st.storage_ns.clone().filter(|_| erased);
+        st.events.borrow_mut().push(HostEvent::Init { settings, storage_ns, lang, dark, author });
         ack(&st, id, true, None);
         st.ctx.request_repaint();
     }
@@ -941,17 +1011,18 @@ mod ehp {
         if !only_keys(p, &["scope"]) {
             return;
         }
-        // §7.7: cleared now, before the answer; the app stops saving settings on its next frame.
-        if all {
-            crate::storage_ns::purge(None);
-        } else if let Some(ns) = st.storage_ns.take() {
-            crate::storage_ns::remove(&ns);
-            crate::storage_ns::purge_legacy();
-        }
+        // §7.7 a, E5: the writes stop first (the gate is sealed for the rest of the page's life, so
+        // no later save, on a frame or on a focus change, can bring a key back), then the storage is
+        // erased and checked. The answer comes only after an effective erasure; otherwise it is
+        // negative ("forbidden": the browser storage could not be reached or kept a key).
+        st.gate.borrow_mut().seal();
+        let erased = if all { crate::storage_ns::purge_all() } else { crate::storage_ns::purge_current(st.storage_ns.as_deref()) };
         st.storage_ns = None;
-        st.events.borrow_mut().push(HostEvent::Purged);
-        ack(&st, id, true, None);
-        st.ctx.request_repaint();
+        if erased {
+            ack(&st, id, true, None);
+        } else {
+            ack(&st, id, false, Some("forbidden"));
+        }
     }
 
     fn ack(st: &State, re: &str, ok: bool, code: Option<&str>) {
@@ -1072,6 +1143,9 @@ mod ehp {
 struct EvoraApp {
     inner: pdfcraft_ui_egui::PdfCraftApp,
     events: ehp::Events,
+    /// E5: `Some` under the Evora bridge (`?host=evora`): whether, and where, the settings may be
+    /// written. `None` outside the bridge, where upstream's saving is unchanged.
+    gate: Option<storage_ns::SharedGate>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1080,24 +1154,24 @@ impl EvoraApp {
         let events: Vec<ehp::HostEvent> = std::mem::take(&mut *self.events.borrow_mut());
         for event in events {
             match event {
-                ehp::HostEvent::Init { storage_ns, lang, dark, author } => {
-                    // E5: this account's settings, then the host's language and theme on top.
-                    if let Some(key) = storage_ns::key(&storage_ns) {
-                        if let Some(json) = storage_ns::read(&storage_ns) {
-                            self.inner.restore(&json);
-                        }
-                        storage_ns::purge(Some(&storage_ns));
-                        self.inner.storage_key = Some(key);
+                ehp::HostEvent::Init { settings, storage_ns, lang, dark, author } => {
+                    // E5: this account's settings first, then the host's language, theme and author
+                    // on top; only then may the settings be written, under this account's namespace
+                    // (unless a purge has sealed the gate meanwhile).
+                    if let Some(json) = settings {
+                        self.inner.restore(&json);
                     }
                     self.inner.language = lang.unwrap_or("en").to_string();
                     self.set_dark(dark);
                     if let Some(author) = author {
                         self.inner.comment_prefs.author = author;
                     }
+                    if let (Some(gate), Some(ns)) = (&self.gate, storage_ns) {
+                        gate.borrow_mut().open(&ns);
+                    }
                 }
                 ehp::HostEvent::Lang(lang) => self.inner.language = lang.unwrap_or("en").to_string(),
                 ehp::HostEvent::Theme(dark) => self.set_dark(dark),
-                ehp::HostEvent::Purged => self.inner.storage_key = None,
             }
         }
     }
@@ -1115,11 +1189,24 @@ impl eframe::App for EvoraApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::App::save(&mut self.inner, storage);
+        match &self.gate {
+            // Outside the Evora bridge: upstream's saving, unchanged (shared key "pdfcraft").
+            None => eframe::App::save(&mut self.inner, storage),
+            // E5: under this account's namespace only, once `evora:init` has opened the gate, and
+            // never after `evora:purge` has sealed it.
+            Some(gate) => {
+                let key = gate.borrow().key();
+                if let Some(key) = key {
+                    storage.set_string(&key, self.inner.persist());
+                }
+            }
+        }
     }
 
     fn persist_egui_memory(&self) -> bool {
-        eframe::App::persist_egui_memory(&self.inner)
+        // E5: under the Evora bridge, eframe's UI memory (`egui_memory_ron`, one key for the whole
+        // origin, outside any namespace) is never written.
+        self.gate.is_none() && eframe::App::persist_egui_memory(&self.inner)
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
