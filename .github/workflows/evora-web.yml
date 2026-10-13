@@ -250,6 +250,18 @@ jobs:
           TRUNK_TOOLS_WASM_OPT: ${{ env.BINARYEN_VERSION }}
         run: trunk build --release --locked --offline
 
+      - name: Polices craft-fonts (E6 ; commit épinglé vérifié, faces embarquées mesurées)
+        env:
+          REPORT: ${{ steps.meta.outputs.report }}
+        run: |
+          set -euo pipefail
+          have="$(git -C evora-ci/craft-fonts rev-parse HEAD)"
+          if [ "$have" != "$CRAFT_FONTS_REF" ]; then
+            echo "::error::craft-fonts au commit $have, épinglé $CRAFT_FONTS_REF"; exit 1
+          fi
+          echo "::notice::craft-fonts au commit épinglé $have"
+          python3 -I .github/evora/gates.py fonts evora-ci/craft-fonts "$REPORT"
+
       - name: Licences des dépendances (cargo-about ; bloquante)
         env:
           REPORT: ${{ steps.meta.outputs.report }}
