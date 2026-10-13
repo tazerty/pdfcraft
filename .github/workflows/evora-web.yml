@@ -210,6 +210,8 @@ jobs:
           for f in LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md; do
             if [ -f "$f" ]; then cp "$f" "$PKG/LICENSES/"; fi
           done
+          # E1 : mention en texte simple « basé sur PdfCraft par l'équipe ArtCraft » (hors du bundle).
+          cp apps/pdfcraft-web/EVORA-MENTIONS.txt "$PKG/LICENSES/MENTIONS-EVORA.txt"
           # Licences des polices craft-fonts embarquées (logique de copy_font_licences, packaging/env.sh).
           for f in "$CRAFT_FONTS_DIR"/fonts/*/OFL.txt; do
             if [ -f "$f" ]; then cp "$f" "$PKG/LICENSES/OFL-$(basename "$(dirname "$f")").txt"; fi
