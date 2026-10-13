@@ -20,4 +20,7 @@ it	JavaScript di Acrobat	JavaScript PDF
 *	Acrobat 5.0	PDF 1.4
 *	Acrobat 3.0	PDF 1.1
 *	Acrobat	PDF
+# Evora (E2): the product shows as Colophon (Evora decision D-4: technical ids unchanged). The
+# About dialog keeps the upstream name PdfCraft as its credit.
+*	PdfCraft	Colophon
 msg	(Acrobat X and later)	(PDF 2.0 and later)
