@@ -334,29 +334,50 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
         chrome.call("Emulation.setDeviceMetricsOverride",
                     {"width": IFRAME_W + 40, "height": IFRAME_H + 40, "deviceScaleFactor": 1, "mobile": False}, page)
         chrome.call("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True}, page)
+        def wait_ready(t0, stale=()):
+            """Attend un contexte moteur (hors `stale`) dont eframe a dimensionné le canvas."""
+            probe = None
+            while time.monotonic() - t0 < READY_TIMEOUT:
+                chrome.pump(0.1)
+                if errors and time.monotonic() - t0 > ERROR_GRACE:
+                    break  # erreurs déjà relevées : inutile d'attendre la fin du délai
+                engine_ctx = [k for k, o in contexts.items() if o == ENGINE_ORIGIN and k not in stale]
+                if not engine_ctx:
+                    continue
+                sess, ctx = engine_ctx[-1]
+                try:
+                    r = chrome.call("Runtime.evaluate", {"expression": PROBE, "contextId": ctx, "returnByValue": True}, sess, 10)
+                except (RuntimeError, TimeoutError):
+                    continue
+                probe = json.loads(r.get("result", {}).get("value", "{}") or "{}")
+                if probe.get("canvas") and probe.get("cw", 0) > 0 and probe.get("w") != 300 \
+                        and abs(probe["w"] - round(probe["cw"] * probe.get("dpr", 1))) <= 1:
+                    marks = probe.get("marks", {})
+                    result["trunk_started_ms"] = round(marks["trunkStarted"]) if "trunkStarted" in marks else None
+                    return (time.monotonic() - t0, marks.get("canvasSized", probe["t"]), sess, ctx), probe
+            return None, probe
+
         t0 = time.monotonic()
         chrome.call("Page.navigate", {"url": f"{PARENT_ORIGIN}/"}, page)
-        ready = None
-        probe = None
-        while time.monotonic() - t0 < READY_TIMEOUT:
-            chrome.pump(0.1)
-            if errors and time.monotonic() - t0 > ERROR_GRACE:
-                break  # erreurs déjà relevées : inutile d'attendre la fin du délai
-            engine_ctx = [k for k, o in contexts.items() if o == ENGINE_ORIGIN]
-            if not engine_ctx:
-                continue
-            sess, ctx = engine_ctx[-1]
-            try:
-                r = chrome.call("Runtime.evaluate", {"expression": PROBE, "contextId": ctx, "returnByValue": True}, sess, 10)
-            except (RuntimeError, TimeoutError):
-                continue
-            probe = json.loads(r.get("result", {}).get("value", "{}") or "{}")
-            if probe.get("canvas") and probe.get("cw", 0) > 0 and probe.get("w") != 300 \
-                    and abs(probe["w"] - round(probe["cw"] * probe.get("dpr", 1))) <= 1:
-                marks = probe.get("marks", {})
-                ready = (time.monotonic() - t0, marks.get("canvasSized", probe["t"]), sess, ctx)
-                result["trunk_started_ms"] = round(marks["trunkStarted"]) if "trunkStarted" in marks else None
-                break
+        ready, probe = wait_ready(t0)
+        if ready is not None and expect.get("legacy_storage"):
+            # E5 : un « compte précédent » a laissé ses réglages sous les clés partagées de l'amont ;
+            # après rechargement, le moteur ne doit ni les appliquer (langue « ja ») ni les garder.
+            _, _, sess0, ctx0 = ready
+            seed = ("localStorage.setItem('pdfcraft', JSON.stringify({language: 'ja', author: 'Compte précédent'}));"
+                    "localStorage.setItem('printcraft', '{}'); 'ok'")
+            chrome.call("Runtime.evaluate", {"expression": seed, "contextId": ctx0, "returnByValue": True}, sess0)
+            stale = set(k for k, o in contexts.items() if o == ENGINE_ORIGIN)
+            chrome.send("Runtime.evaluate", {"expression": "location.reload()", "contextId": ctx0}, sess0)
+            ready, probe = wait_ready(time.monotonic(), stale)
+            if ready is not None:
+                _, _, sess1, ctx1 = ready
+                keys = chrome.call("Runtime.evaluate", {"expression": "JSON.stringify(Object.keys(localStorage))",
+                                                        "contextId": ctx1, "returnByValue": True}, sess1)
+                result["storage_keys"] = json.loads(keys.get("result", {}).get("value", "[]"))
+                leftover = [k for k in ("pdfcraft", "printcraft") if k in result["storage_keys"]]
+                if leftover:
+                    errors.append(f"[test] clés partagées de l'amont encore présentes après démarrage : {leftover}")
         result["probe"] = probe
         if ready is None:
             errors.append(f"[test] canvas non dimensionné par eframe après {time.monotonic() - t0:.0f} s "
@@ -436,6 +457,10 @@ def main(argv):
         # E3 : langue et thème imposés par l'URL du moteur, vérifiés au rendu.
         results.append(run_scenario("fr-sombre", site, engine_csp(hashes), out_dir, chrome_bin, fr,
                                     {"probe": "Bienvenue", "dark": True}))
+        # E5 : les réglages laissés par un autre compte sous les clés partagées ne s'appliquent pas
+        # (la langue « ja » semée ne doit pas apparaître : « Welcome » reste dessiné) et sont purgés.
+        results.append(run_scenario("stockage", site, engine_csp(hashes), out_dir, chrome_bin, en,
+                                    {"probe": "Welcome", "dark": False, "legacy_storage": True}))
     with open(os.path.join(out_dir, "smoke.json"), "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2, ensure_ascii=False)
     with open(report_path, "a", encoding="utf-8") as report:
@@ -461,6 +486,8 @@ def main(argv):
             if wasm:
                 log(f"- {r['scenario']} : .wasm chargé en {wasm[0]['dur']} ms ({wasm[0]['size']} octets transférés, sans compression HTTP)")
             log(f"- {r['scenario']} : messages reçus par la page parente : {r.get('parent_messages', [])}")
+            if "storage_keys" in r:
+                log(f"- {r['scenario']} : clés localStorage de l'origine moteur après rechargement : {r['storage_keys']}")
             if "audit" in r:
                 log(f"- {r['scenario']} : audit au rendu E9/E10 (window.__evoraAudit) : {r['audit']}")
             for e in r["errors"]:
