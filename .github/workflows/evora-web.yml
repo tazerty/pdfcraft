@@ -20,8 +20,9 @@
 # CSP des scripts inline ; test de fumée Chrome depuis une origine différente (avec et sans CSP).
 # Mesures imprimées : taille du .wasm (brut, .br, .gz), démarrage à froid.
 #
-# Sortie : artefact de run evora-pdfcraft-web-<tag> (archive .zip avec .br/.gz, LICENSES/ et
-# csp-hashes.txt ; SHA256SUMS ; BUILD-INFO.txt ; csp-hashes.txt) et artefact evora-smoke-<tag>.
+# Sortie : artefact de run evora-colophon-atelier-web-<tag> (archive .zip avec .br/.gz, LICENSES/
+# et csp-hashes.txt ; SHA256SUMS ; BUILD-INFO.txt ; csp-hashes.txt) et artefact evora-smoke-<tag>.
+# Le nom Evora n'a été pris qu'après E1 (retrait des marques ArtCraft) et le vert des portes.
 
 name: Evora web
 
@@ -108,7 +109,8 @@ jobs:
           {
             echo "tag=$TAG"
             echo "version=$VERSION"
-            echo "name=evora-pdfcraft-web-$TAG"
+            # Nom Evora (E1 posé et portes au vert depuis le run 38367774651) : Colophon, Atelier.
+            echo "name=evora-colophon-atelier-web-$TAG"
             echo "commit=$(git rev-parse HEAD)"
             echo "epoch=$(git log -1 --format=%ct)"
             echo "report=$RUNNER_TEMP/evora-portes.md"
