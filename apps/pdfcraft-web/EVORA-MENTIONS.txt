@@ -1,0 +1,27 @@
+Colophon, Atelier (Evora) : mentions
+====================================
+
+Français
+--------
+L'Atelier de Colophon est basé sur PdfCraft par l'équipe ArtCraft
+(https://github.com/storytold/pdfcraft), distribué sous licence MIT OR Apache-2.0.
+Cette version est modifiée par Evora (fork https://github.com/tazerty/pdfcraft, branche evora/<tag>).
+Le nom, le logotype et la marque ArtCraft appartiennent à l'équipe ArtCraft ; ils ne sont pas
+couverts par la licence du code (docs/brand/LICENSE-brand.txt du dépôt amont) et ont été retirés
+de cette version. Cette version n'est pas un produit ArtCraft et n'est ni approuvée ni soutenue
+par l'équipe ArtCraft.
+
+Les licences et notices tierces sont conservées dans ce dossier : LICENSE-MIT, LICENSE-APACHE,
+NOTICE, ATTRIBUTION.md, licences des polices (OFL-*.txt) et licences des dépendances Rust.
+
+English
+-------
+The Colophon Atelier is based on PdfCraft by the ArtCraft Team
+(https://github.com/storytold/pdfcraft), licensed MIT OR Apache-2.0.
+This version is modified by Evora (fork https://github.com/tazerty/pdfcraft, branch evora/<tag>).
+The ArtCraft name, logo and trademark belong to the ArtCraft Team; they are not covered by the
+code licence (docs/brand/LICENSE-brand.txt upstream) and have been removed from this version.
+This version is not an ArtCraft product and is not endorsed or supported by the ArtCraft Team.
+
+Third-party licences and notices are kept in this folder: LICENSE-MIT, LICENSE-APACHE, NOTICE,
+ATTRIBUTION.md, font licences (OFL-*.txt) and the licences of the Rust dependencies.
