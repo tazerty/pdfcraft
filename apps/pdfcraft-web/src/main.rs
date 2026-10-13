@@ -25,11 +25,21 @@ fn main() {
                     let mut app = PdfCraftApp::new();
                     // Evora (E9, E10): `?evora-audit=1` (CI smoke test) audits every text drawn.
                     if query_param("evora-audit").as_deref() == Some("1") {
-                        cc.egui_ctx.add_plugin(e10::Audit::default());
+                        cc.egui_ctx.add_plugin(e10::Audit::new(query_param("evora-probe")));
                     }
                     // "printcraft": settings saved under the app's former name, PrintCraft.
                     if let Some(json) = cc.storage.and_then(|s| s.get_string("pdfcraft").or_else(|| s.get_string("printcraft"))) {
                         app.restore(&json);
+                    }
+                    // Evora (E3): `?lang=` and `?theme=` impose the first language and theme, read
+                    // after the saved settings so the host's choice wins (HOST-PROTOCOL.md §2.4).
+                    if let Some(code) = query_param("lang").and_then(|tag| evora_lang(&tag)) {
+                        app.language = code.to_string();
+                    }
+                    match query_param("theme").as_deref() {
+                        Some("light") => app.set_theme_preference(pdfcraft_ui_egui::theme::ThemePreference::Light),
+                        Some("dark") => app.set_theme_preference(pdfcraft_ui_egui::theme::ThemePreference::Dark),
+                        _ => {}
                     }
                     // Evora (E7): no `?file=<url>`. The engine fetches nothing named by its URL;
                     // documents come from the host page only (EHP, HOST-PROTOCOL.md §2.4, §5.4).
@@ -84,6 +94,24 @@ fn warn_before_unload(unsaved: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     if window.add_event_listener_with_callback("beforeunload", handler.as_ref().unchecked_ref()).is_ok() {
         handler.forget();
     }
+}
+
+/// Evora (E3): the interface language for an Evora language code (`engineLang` of
+/// HOST-PROTOCOL.md, already converted by the host, or the Evora code itself). `zh-Hans` and the
+/// Simplified regions map to `zh-hans`, the Traditional ones to `zh-hant`. Plain `pt` maps to
+/// nothing until Evora picks its Portuguese variant (decision D-23); `pt-br` given explicitly is
+/// honoured. A language without a catalogue here (hi, id, ko…) gives `None`: the engine stays in
+/// English and the host shows its own banner.
+#[cfg(target_arch = "wasm32")]
+fn evora_lang(tag: &str) -> Option<&'static str> {
+    let tag = tag.trim().replace('_', "-").to_ascii_lowercase();
+    let code = match tag.as_str() {
+        "zh-hans" | "zh-cn" | "zh-sg" | "zh-hans-cn" => "zh-hans",
+        "zh-hant" | "zh-tw" | "zh-hk" | "zh-mo" | "zh-hant-tw" => "zh-hant",
+        "pt" => return None,
+        other => other,
+    };
+    pdfcraft_ui_egui::i18n::normalize_pref(code).filter(|c| *c != pdfcraft_ui_egui::i18n::AUTO)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -228,7 +256,8 @@ mod host {
 /// Evora (E9, E10): render-time audit for the CI smoke test. With `?evora-audit=1`, every text egui
 /// draws is checked just before it reaches the screen for emoji (E10) and for third-party product
 /// names (E9), and the running totals are published as
-/// `window.__evoraAudit = { frames, texts, emoji, terms, sample, selftest }`.
+/// `window.__evoraAudit = { frames, texts, emoji, terms, sample, selftest, dark, probe }`, where
+/// `probe` counts the drawn texts containing `?evora-probe=` (E3: the imposed language shows).
 #[cfg(target_arch = "wasm32")]
 mod e10 {
     use eframe::wasm_bindgen::JsValue;
@@ -271,6 +300,9 @@ mod e10 {
         emoji: u64,
         terms: u64,
         sample: String,
+        dark: bool,
+        probe: Option<String>,
+        probe_hits: u64,
     }
 
     fn sensitive_terms(text: &str) -> u64 {
@@ -290,6 +322,10 @@ mod e10 {
     }
 
     impl Audit {
+        pub fn new(probe: Option<String>) -> Self {
+            Self { probe: probe.filter(|p| !p.is_empty()), ..Self::default() }
+        }
+
         fn scan(&mut self, shape: &egui::Shape) {
             match shape {
                 egui::Shape::Vec(shapes) => {
@@ -302,6 +338,9 @@ mod e10 {
                     let shown = text.galley.text();
                     let emoji = shown.chars().filter(|c| is_emoji_like(*c)).count() as u64;
                     let terms = sensitive_terms(shown);
+                    if self.probe.as_deref().is_some_and(|p| shown.contains(p)) {
+                        self.probe_hits += 1;
+                    }
                     if emoji + terms > 0 {
                         self.emoji += emoji;
                         self.terms += terms;
@@ -324,6 +363,8 @@ mod e10 {
                 ("terms", JsValue::from_f64(self.terms as f64)),
                 ("sample", JsValue::from_str(&self.sample)),
                 ("selftest", JsValue::from_bool(selftest())),
+                ("dark", JsValue::from_bool(self.dark)),
+                ("probe", JsValue::from_f64(self.probe_hits as f64)),
             ] {
                 let _ = js_sys::Reflect::set(&report, &JsValue::from_str(key), &value);
             }
@@ -336,8 +377,9 @@ mod e10 {
             "evora-display-audit"
         }
 
-        fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {
+        fn output_hook(&mut self, ctx: &egui::Context, output: &mut egui::FullOutput) {
             self.frames += 1;
+            self.dark = ctx.global_style().visuals.dark_mode;
             for clipped in &output.shapes {
                 self.scan(&clipped.shape);
             }

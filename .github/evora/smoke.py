@@ -71,11 +71,11 @@ def engine_csp(hashes):
             f"frame-ancestors {PARENT_ORIGIN}; object-src 'none'; base-uri 'none'")
 
 
-def parent_page():
+def parent_page(query):
     return f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Evora smoke</title></head>
 <body style="margin:0;background:#fff">
-<iframe id="engine" src="{ENGINE_ORIGIN}/index.html{ENGINE_QUERY}" width="{IFRAME_W}" height="{IFRAME_H}"
+<iframe id="engine" src="{ENGINE_ORIGIN}/index.html{query}" width="{IFRAME_W}" height="{IFRAME_H}"
  style="border:0;display:block" sandbox="allow-scripts allow-same-origin"></iframe>
 <script>
 window.__evoraMessages = [];
@@ -270,13 +270,14 @@ RESOURCES = """JSON.stringify(performance.getEntriesByType('resource').map(e => 
   name: e.name.split('/').pop(), dur: Math.round(e.duration), size: e.transferSize || e.encodedBodySize || 0})))"""
 
 
-def run_scenario(name, site, csp, out_dir, chrome_bin):
+def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expect=None):
     served = []
+    expect = expect or {}
     engine = start_server(PORT_A, "127.0.0.1", directory=site, csp=csp, served=served)
-    parent = start_server(PORT_B, "127.0.0.1", page=parent_page(), served=served)
+    parent = start_server(PORT_B, "127.0.0.1", page=parent_page(query), served=served)
     # « localhost » peut se résoudre en ::1 : la page parente écoute aussi en IPv6 quand c'est possible.
     try:
-        parent6 = start_server(PORT_B, "::1", page=parent_page(), served=served)
+        parent6 = start_server(PORT_B, "::1", page=parent_page(query), served=served)
     except OSError:
         parent6 = None
     profile = tempfile.mkdtemp(prefix=f"evora-smoke-{name}-")
@@ -321,7 +322,7 @@ def run_scenario(name, site, csp, out_dir, chrome_bin):
                 errors.append(f"[{where}] journal ({e.get('source', '')}) : {e.get('text', '')} {e.get('url', '')}")
 
     chrome.handlers.append(on_event)
-    result = {"scenario": name, "csp": bool(csp), "ok": False}
+    result = {"scenario": name, "csp": bool(csp), "query": query, "ok": False}
     try:
         version = chrome.call("Browser.getVersion")
         result["chrome"] = version.get("product", "?")
@@ -371,7 +372,7 @@ def run_scenario(name, site, csp, out_dir, chrome_bin):
             result["gl"] = gl.get("result", {}).get("value")
             if result["gl"] != "webgl2":
                 errors.append(f"[test] contexte du canvas : {result['gl']} (attendu : webgl2)")
-            if "evora-audit=1" in ENGINE_QUERY:
+            if "evora-audit=1" in query:
                 # E9 et E10 vérifiés au rendu : le moteur audite chaque texte dessiné (window.__evoraAudit).
                 audit = chrome.call("Runtime.evaluate", {"expression": "JSON.stringify(window.__evoraAudit || null)",
                                                          "contextId": ctx, "returnByValue": True}, sess)
@@ -382,6 +383,10 @@ def run_scenario(name, site, csp, out_dir, chrome_bin):
                 elif a.get("emoji") or a.get("terms"):
                     errors.append(f"[test] audit au rendu : {a.get('emoji')} émoji(s) (E10) et {a.get('terms')} terme(s) "
                                   f"sensible(s) (E9) dessinés, ex. « {a.get('sample', '')} »")
+                if a and "dark" in expect and a.get("dark") is not expect["dark"]:
+                    errors.append(f"[test] thème au rendu : sombre={a.get('dark')} (attendu : {expect['dark']})")
+                if a and expect.get("probe") and not a.get("probe"):
+                    errors.append(f"[test] texte attendu au rendu absent (sonde {expect['probe']!r}) : langue non appliquée ?")
             res = chrome.call("Runtime.evaluate", {"expression": RESOURCES, "contextId": ctx, "returnByValue": True}, sess)
             result["resources"] = json.loads(res.get("result", {}).get("value", "[]"))
             msgs = chrome.call("Runtime.evaluate", {"expression": "JSON.stringify(window.__evoraMessages || [])",
@@ -419,8 +424,18 @@ def main(argv):
         return 1
     with open(hashes_file, encoding="utf-8") as fh:
         hashes = [line.strip() for line in fh if line.strip().startswith("sha256-")]
-    results = [run_scenario("sans-csp", site, None, out_dir, chrome_bin),
-               run_scenario("csp", site, engine_csp(hashes), out_dir, chrome_bin)]
+    audit = "evora-audit=1" in ENGINE_QUERY
+    sep = "&" if "?" in ENGINE_QUERY else "?"
+    en = f"{ENGINE_QUERY}{sep}evora-probe=Welcome" if audit else ENGINE_QUERY
+    fr = f"{ENGINE_QUERY}{sep}lang=fr&theme=dark&evora-probe=Bienvenue"
+    results = [run_scenario("sans-csp", site, None, out_dir, chrome_bin, en,
+                            {"probe": "Welcome", "dark": False} if audit else None),
+               run_scenario("csp", site, engine_csp(hashes), out_dir, chrome_bin, en,
+                            {"probe": "Welcome", "dark": False} if audit else None)]
+    if audit:
+        # E3 : langue et thème imposés par l'URL du moteur, vérifiés au rendu.
+        results.append(run_scenario("fr-sombre", site, engine_csp(hashes), out_dir, chrome_bin, fr,
+                                    {"probe": "Bienvenue", "dark": True}))
     with open(os.path.join(out_dir, "smoke.json"), "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2, ensure_ascii=False)
     with open(report_path, "a", encoding="utf-8") as report:
@@ -429,8 +444,8 @@ def main(argv):
             report.write(line + "\n")
         log("### Test de fumée Chrome sans interface, origine croisée (bloquant)")
         log()
-        log(f"Moteur servi par {ENGINE_ORIGIN} (URL de l'iframe : index.html{ENGINE_QUERY}), encadré par une page de "
-            f"{PARENT_ORIGIN} ; profil vierge par scénario.")
+        log(f"Moteur servi par {ENGINE_ORIGIN}, encadré par une page de {PARENT_ORIGIN} ; profil vierge par scénario. "
+            "URL de l'iframe : " + " ; ".join(f"{r['scenario']} index.html{r['query']}" for r in results))
         log(f"Navigateur : {results[0].get('chrome', '?')}")
         log()
         log("| Scénario | Résultat | Démarrage à froid : canvas dimensionné (iframe) | dont chargeur Trunk terminé | "
