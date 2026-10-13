@@ -1,0 +1,337 @@
+# Evora : build web de PdfCraft, futur moteur de l'Atelier de Colophon (evora.st).
+#
+# Écrit pour le fork tazerty/pdfcraft à partir de packaging/web/package.sh, packaging/env.sh et
+# docs/releasing.md du dépôt (MIT OR Apache-2.0). Rien n'est repris de
+# storytold/craft-common-actions.
+#
+# Règles de ce workflow :
+#   - seules actions utilisées : actions/checkout, actions/cache et actions/upload-artifact,
+#     épinglées par SHA de commit complet ;
+#   - Rust installé par rustup en ligne de commande, version épinglée ;
+#   - Trunk, wasm-bindgen et wasm-opt : binaires de release à version épinglée, vérifiés par
+#     SHA-256 avant usage ; Trunk tourne hors ligne (--offline) pour ne rien télécharger
+#     d'autre que ce qui est épinglé ici ;
+#   - aucun secret, jeton en lecture seule.
+#
+# Sortie : artefact de run evora-pdfcraft-web-<tag> (archive .zip, SHA256SUMS, BUILD-INFO.txt).
+# Le nom reste « pdfcraft » tant que le patch E1 (retrait des marques ArtCraft) n'est pas posé.
+
+name: Evora web
+
+on:
+  push:
+    branches: ["evora/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evora-web-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Pas de rust-toolchain(.toml) dans le dépôt au tag : stable épinglée, au moins rust-version.
+  RUST_TOOLCHAIN: "1.99.0"
+  RUST_MIN_VERSION: "1.95"
+  # trunk-x86_64-unknown-linux-gnu.tar.gz (release v0.21.14, fichier .sha256 de la release).
+  TRUNK_VERSION: "0.21.14"
+  TRUNK_SHA256: "f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b"
+  # wasm-bindgen-<v>-x86_64-unknown-linux-musl.tar.gz ; la version doit égaler celle de Cargo.lock.
+  WASM_BINDGEN_VERSION: "0.2.129"
+  WASM_BINDGEN_SHA256: "82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e"
+  # binaryen-<v>-x86_64-linux.tar.gz ; version_123 est la version par défaut de Trunk 0.21.14.
+  BINARYEN_VERSION: "version_123"
+  BINARYEN_SHA256: "e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe"
+  # Entrée de build craft-fonts au commit cité par le dépôt (docs/releasing.md, ci.yml, release.yml).
+  CRAFT_FONTS_REF: "3d9ab3a132ed0eff457e424226a435a901da30d3"
+
+jobs:
+  web:
+    name: Build web (wasm32)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout de la branche Evora
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout de craft-fonts (commit épinglé)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: ${{ env.CRAFT_FONTS_REF }}
+          path: evora-ci/craft-fonts
+          persist-credentials: false
+
+      - name: Tag amont et nom de l'artefact
+        id: meta
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$REF_NAME" in
+            evora/*) TAG="${REF_NAME#evora/}" ;;
+            *) echo "::error::branche inattendue : $REF_NAME (attendu : evora/<tag amont>)"; exit 1 ;;
+          esac
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag amont invalide : $TAG"; exit 1
+          fi
+          # Même lecture que packaging/env.sh : [workspace.package] version du Cargo.toml racine.
+          VERSION="$(awk '
+            /^\[/ { in_pkg = ($0 == "[workspace.package]") ; next }
+            in_pkg && $1 == "version" { gsub(/[" ]/, "", $3); print $3; exit }
+          ' Cargo.toml)"
+          if [ "v$VERSION" != "$TAG" ]; then
+            echo "::error::Cargo.toml annonce $VERSION alors que la branche vise $TAG"; exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "name=evora-pdfcraft-web-$TAG"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "epoch=$(git log -1 --format=%ct)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Rust (rustup, version épinglée) et cible wasm32
+        run: |
+          set -euo pipefail
+          rustup --version
+          if [ -f rust-toolchain.toml ] || [ -f rust-toolchain ]; then
+            echo "Fichier rust-toolchain présent dans le dépôt : il fait foi."
+            rustup toolchain install --profile minimal
+          else
+            rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+            rustup default "$RUST_TOOLCHAIN"
+          fi
+          rustup target add wasm32-unknown-unknown
+          rustc --version --verbose
+          cargo --version
+          have="$(rustc --version | awk '{print $2}')"
+          if ! printf '%s\n%s\n' "$RUST_MIN_VERSION" "$have" | sort -V -C; then
+            echo "::error::rustc $have est plus ancien que rust-version $RUST_MIN_VERSION"; exit 1
+          fi
+
+      - name: Cache cargo (registre, dépôts git, target)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: evora-web-${{ runner.os }}-rust${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            evora-web-${{ runner.os }}-rust${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Trunk, wasm-bindgen et wasm-opt (versions épinglées, SHA-256 vérifiés)
+        run: |
+          set -euo pipefail
+          TOOLS="$RUNNER_TEMP/evora-tools"
+          mkdir -p "$TOOLS/dl" "$TOOLS/bin" "$TOOLS/trunk" "$TOOLS/wasm-bindgen" "$TOOLS/binaryen"
+          fetch() { # url sha256 destination
+            curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$3" "$1"
+            echo "$2  $3" | sha256sum -c -
+          }
+          fetch "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            "$TRUNK_SHA256" "$TOOLS/dl/trunk.tar.gz"
+          fetch "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            "$WASM_BINDGEN_SHA256" "$TOOLS/dl/wasm-bindgen.tar.gz"
+          fetch "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+            "$BINARYEN_SHA256" "$TOOLS/dl/binaryen.tar.gz"
+          tar -xzf "$TOOLS/dl/trunk.tar.gz" -C "$TOOLS/trunk"
+          tar -xzf "$TOOLS/dl/wasm-bindgen.tar.gz" -C "$TOOLS/wasm-bindgen"
+          tar -xzf "$TOOLS/dl/binaryen.tar.gz" -C "$TOOLS/binaryen"
+          install -m 0755 "$(find "$TOOLS/trunk" -type f -name trunk -print -quit)" "$TOOLS/bin/trunk"
+          install -m 0755 "$(find "$TOOLS/wasm-bindgen" -type f -name wasm-bindgen -print -quit)" "$TOOLS/bin/wasm-bindgen"
+          # wasm-opt reste dans l'arbre binaryen (il peut y chercher ../lib).
+          WASM_OPT="$(find "$TOOLS/binaryen" -type f -name wasm-opt -print -quit)"
+          [ -x "$WASM_OPT" ] || { echo "::error::wasm-opt introuvable dans l'archive binaryen"; exit 1; }
+          echo "$TOOLS/bin" >> "$GITHUB_PATH"
+          dirname "$WASM_OPT" >> "$GITHUB_PATH"
+
+      - name: Vérification des versions d'outils
+        run: |
+          set -euo pipefail
+          trunk --version
+          wasm-bindgen --version
+          wasm-opt --version
+          trunk --version | grep -qx "trunk ${TRUNK_VERSION}" || { echo "::error::version de trunk inattendue"; exit 1; }
+          wasm-bindgen --version | grep -qx "wasm-bindgen ${WASM_BINDGEN_VERSION}" || { echo "::error::version de wasm-bindgen inattendue"; exit 1; }
+          wasm-opt --version | grep -q "(${BINARYEN_VERSION})" || { echo "::error::version de wasm-opt inattendue"; exit 1; }
+          lock="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
+          if [ "$lock" != "$WASM_BINDGEN_VERSION" ]; then
+            echo "::error::Cargo.lock exige wasm-bindgen $lock, le workflow épingle $WASM_BINDGEN_VERSION"; exit 1
+          fi
+
+      - name: Dépendances cargo (Cargo.lock verrouillé)
+        run: cargo fetch --locked
+
+      - name: Build web release (trunk, hors ligne)
+        working-directory: apps/pdfcraft-web
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/evora-ci/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+          TRUNK_TOOLS_WASM_BINDGEN: ${{ env.WASM_BINDGEN_VERSION }}
+          TRUNK_TOOLS_WASM_OPT: ${{ env.BINARYEN_VERSION }}
+        run: trunk build --release --locked --offline
+
+      - name: Empaquetage du site statique
+        id: pkg
+        env:
+          NAME: ${{ steps.meta.outputs.name }}
+          EPOCH: ${{ steps.meta.outputs.epoch }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/evora-ci/craft-fonts
+        run: |
+          set -euo pipefail
+          SITE="$GITHUB_WORKSPACE/dist/web"
+          if [ ! -f "$SITE/index.html" ]; then
+            echo "::error::$SITE/index.html absent après trunk build"; exit 1
+          fi
+          # Même contrôle que package.sh : des URL relatives, pour servir le site sous n'importe quel préfixe.
+          if grep -Eq '(src|href)="/[^/]' "$SITE/index.html"; then
+            echo "::error::index.html contient des URL absolues à la racine"; exit 1
+          fi
+          WORK="$(mktemp -d)"
+          PKG="$WORK/$NAME"
+          OUT="$GITHUB_WORKSPACE/evora-ci/out"
+          mkdir -p "$PKG/LICENSES" "$OUT"
+          cp -R "$SITE/." "$PKG/"
+          # Différence voulue avec package.sh : ni _headers, ni .htaccess, ni HOSTING.md.
+          # L'hébergement est celui d'Evora ; l'artefact ne doit porter aucun fichier d'hébergement.
+          for f in LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md; do
+            if [ -f "$f" ]; then cp "$f" "$PKG/LICENSES/"; fi
+          done
+          # Licences des polices craft-fonts embarquées (logique de copy_font_licences, packaging/env.sh).
+          for f in "$CRAFT_FONTS_DIR"/fonts/*/OFL.txt; do
+            if [ -f "$f" ]; then cp "$f" "$PKG/LICENSES/OFL-$(basename "$(dirname "$f")").txt"; fi
+          done
+          # Archive reproductible : dates fixées au commit, ordre trié, sans attributs étendus.
+          find "$PKG" -exec touch -h -d "@$EPOCH" {} +
+          (cd "$WORK" && find "$NAME" -print | LC_ALL=C sort | zip -X -9 -q -@ "$OUT/$NAME.zip")
+          {
+            echo "artefact: $NAME.zip"
+            echo "depot: $GITHUB_REPOSITORY"
+            echo "branche: $GITHUB_REF_NAME"
+            echo "commit: $COMMIT"
+            echo "rustc: $(rustc --version)"
+            echo "trunk: $(trunk --version)"
+            echo "wasm-bindgen: $(wasm-bindgen --version)"
+            echo "wasm-opt: $(wasm-opt --version)"
+            echo "craft-fonts: $CRAFT_FONTS_REF"
+            echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$OUT/BUILD-INFO.txt"
+          (cd "$OUT" && sha256sum "$NAME.zip" BUILD-INFO.txt > SHA256SUMS)
+          cat "$OUT/SHA256SUMS"
+          ls -l "$OUT"
+          {
+            echo "pkg=$PKG"
+            echo "out=$OUT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Garde-fous (non bloquants pour cette première passe)
+        continue-on-error: true
+        env:
+          NAME: ${{ steps.meta.outputs.name }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+          PKG: ${{ steps.pkg.outputs.pkg }}
+          OUT: ${{ steps.pkg.outputs.out }}
+        run: |
+          set -uo pipefail
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          count() { grep -a -o -- "$1" "$2" | wc -l; }
+          zip_bytes="$(stat -c %s "$OUT/$NAME.zip")"
+          zip_sha="$(sha256sum "$OUT/$NAME.zip" | cut -d' ' -f1)"
+          {
+            echo "## Evora : pdfcraft web $TAG"
+            echo
+            echo "| Élément | Valeur |"
+            echo "|---|---|"
+            echo "| Commit | \`$COMMIT\` |"
+            echo "| Archive | \`$NAME.zip\`, $zip_bytes octets |"
+            echo "| SHA-256 de l'archive | \`$zip_sha\` |"
+            echo "| rustc | $(rustc --version) |"
+            echo "| Trunk | $(trunk --version) |"
+            echo "| wasm-bindgen | $(wasm-bindgen --version) |"
+            echo "| wasm-opt | $(wasm-opt --version) |"
+            echo "| craft-fonts | \`$CRAFT_FONTS_REF\` |"
+            echo
+            echo "### Garde-fous (mesure, non bloquants)"
+            echo
+          } >> "$SUMMARY"
+
+          # 1. Fichiers d'hébergement dans le paquet (attendu : aucun).
+          hosting="$(find "$PKG" \( -name '_headers' -o -name '.htaccess' -o -name '*.conf' -o -name 'web.config' \) -print)"
+          n_hosting="$(printf '%s' "$hosting" | grep -c . || true)"
+          {
+            echo "**Fichiers d'hébergement** (_headers, .htaccess, *.conf, web.config) : $n_hosting"
+            if [ "$n_hosting" -gt 0 ]; then printf '%s\n' "$hosting" | sed "s|$PKG/|- |"; fi
+            echo
+          } >> "$SUMMARY"
+          if [ "$n_hosting" -gt 0 ]; then echo "::warning::$n_hosting fichier(s) d'hébergement dans le paquet"; fi
+
+          # 2. Taille des .wasm (brut, gzip -9, brotli si disponible) et du site.
+          {
+            echo "**Taille des .wasm**"
+            echo
+            echo "| Fichier | Brut (octets) | gzip -9 | brotli -q 11 |"
+            echo "|---|---|---|---|"
+          } >> "$SUMMARY"
+          while IFS= read -r -d '' w; do
+            raw="$(stat -c %s "$w")"
+            gz="$(gzip -9 -c "$w" | wc -c)"
+            if command -v brotli >/dev/null; then br="$(brotli -q 11 -c "$w" | wc -c)"; else br="n/d"; fi
+            echo "| \`${w#"$PKG"/}\` | $raw | $gz | $br |" >> "$SUMMARY"
+            echo "::notice::${w#"$PKG"/} : $raw octets bruts, $gz en gzip -9"
+          done < <(find "$PKG" -name '*.wasm' -print0)
+          echo >> "$SUMMARY"
+          echo "Site complet : $(du -sb "$PKG" | cut -f1) octets ; fichiers : $(find "$PKG" -type f | wc -l)" >> "$SUMMARY"
+          echo >> "$SUMMARY"
+
+          # 3. Marques ArtCraft dans le bundle (mesure de la future cible E1, hors LICENSES/
+          #    où la mention en texte simple est permise).
+          {
+            echo "**Occurrences de marques** (cible E1 : 0 hors LICENSES/)"
+            echo
+            echo "| Fichier | ArtCraft | artcraft (casse ignorée) | discord.gg | getartcraft |"
+            echo "|---|---|---|---|---|"
+          } >> "$SUMMARY"
+          total_site=0
+          total_licences=0
+          while IFS= read -r -d '' f; do
+            a="$(count 'ArtCraft' "$f")"
+            ai="$(grep -a -o -i -- 'artcraft' "$f" | wc -l)"
+            d="$(count 'discord.gg' "$f")"
+            g="$(grep -a -o -i -- 'getartcraft' "$f" | wc -l)"
+            rel="${f#"$PKG"/}"
+            if [ "$((a + ai + d + g))" -gt 0 ]; then
+              echo "| \`$rel\` | $a | $ai | $d | $g |" >> "$SUMMARY"
+            fi
+            case "$rel" in
+              LICENSES/*) total_licences=$((total_licences + ai)) ;;
+              *) total_site=$((total_site + ai)) ;;
+            esac
+          done < <(find "$PKG" -type f -print0 | LC_ALL=C sort -z)
+          {
+            echo
+            echo "Total « artcraft » (casse ignorée) hors LICENSES/ : **$total_site** ; dans LICENSES/ : $total_licences"
+          } >> "$SUMMARY"
+          if [ "$total_site" -gt 0 ]; then
+            echo "::warning::$total_site occurrence(s) de la marque ArtCraft dans le bundle (cible E1 : 0)"
+          fi
+
+      - name: Artefact du run
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.meta.outputs.name }}
+          path: evora-ci/out/
+          if-no-files-found: error
