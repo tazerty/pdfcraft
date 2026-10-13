@@ -8,13 +8,20 @@
 #   - seules actions utilisées : actions/checkout, actions/cache et actions/upload-artifact,
 #     épinglées par SHA de commit complet ;
 #   - Rust installé par rustup en ligne de commande, version épinglée ;
-#   - Trunk, wasm-bindgen et wasm-opt : binaires de release à version épinglée, vérifiés par
-#     SHA-256 avant usage ; Trunk tourne hors ligne (--offline) pour ne rien télécharger
-#     d'autre que ce qui est épinglé ici ;
+#   - Trunk, wasm-bindgen, wasm-opt, cargo-deny et cargo-about : binaires de release à version
+#     épinglée, vérifiés par SHA-256 avant usage ; Trunk tourne hors ligne (--offline) ;
+#   - scripts de porte écrits par Evora (.github/evora/, Python de la bibliothèque standard) ;
+#     test de fumée sur le Chrome préinstallé du runner, sans action tierce ;
 #   - aucun secret, jeton en lecture seule.
 #
-# Sortie : artefact de run evora-pdfcraft-web-<tag> (archive .zip, SHA256SUMS, BUILD-INFO.txt).
-# Le nom reste « pdfcraft » tant que le patch E1 (retrait des marques ArtCraft) n'est pas posé.
+# Portes BLOQUANTES (patch E1 posé) : cargo-deny (advisories, bans, licences, sources) ;
+# cargo-about (LICENSES/ agrégé) ; marques ArtCraft dans le bundle (0 hors LICENSES/) ; fichiers
+# d'hébergement (0) ; émojis des catalogues affichés (E10, ligne de base décroissante) ; empreintes
+# CSP des scripts inline ; test de fumée Chrome depuis une origine différente (avec et sans CSP).
+# Mesures imprimées : taille du .wasm (brut, .br, .gz), démarrage à froid.
+#
+# Sortie : artefact de run evora-pdfcraft-web-<tag> (archive .zip avec .br/.gz, LICENSES/ et
+# csp-hashes.txt ; SHA256SUMS ; BUILD-INFO.txt ; csp-hashes.txt) et artefact evora-smoke-<tag>.
 
 name: Evora web
 
@@ -49,6 +56,12 @@ env:
   # binaryen-<v>-x86_64-linux.tar.gz ; version_123 est la version par défaut de Trunk 0.21.14.
   BINARYEN_VERSION: "version_123"
   BINARYEN_SHA256: "e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe"
+  # cargo-deny-<v>-x86_64-unknown-linux-musl.tar.gz (empreinte relevée sur la release GitHub).
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  # cargo-about-<v>-x86_64-unknown-linux-musl.tar.gz (empreinte relevée sur la release GitHub).
+  CARGO_ABOUT_VERSION: "0.9.2"
+  CARGO_ABOUT_SHA256: "9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af"
   # Entrée de build craft-fonts au commit cité par le dépôt (docs/releasing.md, ci.yml, release.yml).
   CRAFT_FONTS_REF: "3d9ab3a132ed0eff457e424226a435a901da30d3"
 
@@ -98,7 +111,14 @@ jobs:
             echo "name=evora-pdfcraft-web-$TAG"
             echo "commit=$(git rev-parse HEAD)"
             echo "epoch=$(git log -1 --format=%ct)"
+            echo "report=$RUNNER_TEMP/evora-portes.md"
           } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Evora : build web $TAG"
+            echo
+            echo "Commit \`$(git rev-parse HEAD)\` ; craft-fonts \`$CRAFT_FONTS_REF\`."
+            echo
+          } > "$RUNNER_TEMP/evora-portes.md"
 
       - name: Rust (rustup, version épinglée) et cible wasm32
         run: |
@@ -131,11 +151,11 @@ jobs:
           restore-keys: |
             evora-web-${{ runner.os }}-rust${{ env.RUST_TOOLCHAIN }}-
 
-      - name: Trunk, wasm-bindgen et wasm-opt (versions épinglées, SHA-256 vérifiés)
+      - name: Outils épinglés (Trunk, wasm-bindgen, wasm-opt, cargo-deny, cargo-about ; SHA-256 vérifiés)
         run: |
           set -euo pipefail
           TOOLS="$RUNNER_TEMP/evora-tools"
-          mkdir -p "$TOOLS/dl" "$TOOLS/bin" "$TOOLS/trunk" "$TOOLS/wasm-bindgen" "$TOOLS/binaryen"
+          mkdir -p "$TOOLS/dl" "$TOOLS/bin" "$TOOLS/trunk" "$TOOLS/wasm-bindgen" "$TOOLS/binaryen" "$TOOLS/deny" "$TOOLS/about"
           fetch() { # url sha256 destination
             curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$3" "$1"
             echo "$2  $3" | sha256sum -c -
@@ -146,11 +166,19 @@ jobs:
             "$WASM_BINDGEN_SHA256" "$TOOLS/dl/wasm-bindgen.tar.gz"
           fetch "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
             "$BINARYEN_SHA256" "$TOOLS/dl/binaryen.tar.gz"
+          fetch "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            "$CARGO_DENY_SHA256" "$TOOLS/dl/cargo-deny.tar.gz"
+          fetch "https://github.com/EmbarkStudios/cargo-about/releases/download/${CARGO_ABOUT_VERSION}/cargo-about-${CARGO_ABOUT_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            "$CARGO_ABOUT_SHA256" "$TOOLS/dl/cargo-about.tar.gz"
           tar -xzf "$TOOLS/dl/trunk.tar.gz" -C "$TOOLS/trunk"
           tar -xzf "$TOOLS/dl/wasm-bindgen.tar.gz" -C "$TOOLS/wasm-bindgen"
           tar -xzf "$TOOLS/dl/binaryen.tar.gz" -C "$TOOLS/binaryen"
+          tar -xzf "$TOOLS/dl/cargo-deny.tar.gz" -C "$TOOLS/deny"
+          tar -xzf "$TOOLS/dl/cargo-about.tar.gz" -C "$TOOLS/about"
           install -m 0755 "$(find "$TOOLS/trunk" -type f -name trunk -print -quit)" "$TOOLS/bin/trunk"
           install -m 0755 "$(find "$TOOLS/wasm-bindgen" -type f -name wasm-bindgen -print -quit)" "$TOOLS/bin/wasm-bindgen"
+          install -m 0755 "$(find "$TOOLS/deny" -type f -name cargo-deny -print -quit)" "$TOOLS/bin/cargo-deny"
+          install -m 0755 "$(find "$TOOLS/about" -type f -name cargo-about -print -quit)" "$TOOLS/bin/cargo-about"
           # wasm-opt reste dans l'arbre binaryen (il peut y chercher ../lib).
           WASM_OPT="$(find "$TOOLS/binaryen" -type f -name wasm-opt -print -quit)"
           [ -x "$WASM_OPT" ] || { echo "::error::wasm-opt introuvable dans l'archive binaryen"; exit 1; }
@@ -163,9 +191,13 @@ jobs:
           trunk --version
           wasm-bindgen --version
           wasm-opt --version
+          cargo-deny --version
+          cargo-about --version
           trunk --version | grep -qx "trunk ${TRUNK_VERSION}" || { echo "::error::version de trunk inattendue"; exit 1; }
           wasm-bindgen --version | grep -qx "wasm-bindgen ${WASM_BINDGEN_VERSION}" || { echo "::error::version de wasm-bindgen inattendue"; exit 1; }
           wasm-opt --version | grep -q "(${BINARYEN_VERSION})" || { echo "::error::version de wasm-opt inattendue"; exit 1; }
+          cargo-deny --version | grep -q " ${CARGO_DENY_VERSION}\$" || { echo "::error::version de cargo-deny inattendue"; exit 1; }
+          cargo-about --version | grep -q " ${CARGO_ABOUT_VERSION}\$" || { echo "::error::version de cargo-about inattendue"; exit 1; }
           lock="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
           if [ "$lock" != "$WASM_BINDGEN_VERSION" ]; then
             echo "::error::Cargo.lock exige wasm-bindgen $lock, le workflow épingle $WASM_BINDGEN_VERSION"; exit 1
@@ -173,6 +205,38 @@ jobs:
 
       - name: Dépendances cargo (Cargo.lock verrouillé)
         run: cargo fetch --locked
+
+      - name: Porte cargo-deny (advisories, bans, licences, sources ; bloquante)
+        env:
+          REPORT: ${{ steps.meta.outputs.report }}
+        run: |
+          # deny.toml est celui de l'amont, inchangé. Les avertissements sont imprimés et comptés,
+          # jamais masqués ; une erreur arrête le job.
+          set +e
+          set -uo pipefail
+          LOG="$RUNNER_TEMP/cargo-deny.log"
+          cargo deny --log-level warn check advisories bans licenses sources 2>&1 | tee "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          # Comptage sur une copie sans codes de couleur ANSI.
+          sed 's/\x1b\[[0-9;]*m//g' "$LOG" > "$LOG.txt"
+          LOG="$LOG.txt"
+          n_err="$(grep -c '^error\[' "$LOG" || true)"
+          n_warn="$(grep -c '^warning\[' "$LOG" || true)"
+          {
+            echo "### Porte cargo-deny $CARGO_DENY_VERSION (bloquante)"
+            echo
+            echo "\`cargo deny --log-level warn check advisories bans licenses sources\` (deny.toml de l'amont) : statut **$status**, erreurs **$n_err**, avertissements **$n_warn**."
+            if [ "$n_warn" -gt 0 ] || [ "$n_err" -gt 0 ]; then
+              echo
+              echo '```'
+              grep -E '^(error|warning)\[' "$LOG" | sort | uniq -c
+              echo '```'
+            fi
+            echo
+          } >> "$REPORT"
+          echo "::notice::cargo-deny : statut $status, $n_err erreur(s), $n_warn avertissement(s)"
+          exit "$status"
 
       - name: Build web release (trunk, hors ligne)
         working-directory: apps/pdfcraft-web
@@ -183,12 +247,26 @@ jobs:
           TRUNK_TOOLS_WASM_OPT: ${{ env.BINARYEN_VERSION }}
         run: trunk build --release --locked --offline
 
+      - name: Licences des dépendances (cargo-about ; bloquante)
+        env:
+          REPORT: ${{ steps.meta.outputs.report }}
+        run: |
+          set -euo pipefail
+          cargo about generate --manifest-path apps/pdfcraft-web/Cargo.toml -c .github/evora/about.toml \
+            --format json --frozen --fail -o "$RUNNER_TEMP/about.json"
+          python3 -I .github/evora/licenses.py "$RUNNER_TEMP/about.json" "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt"
+          n="$(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("crates", [])), len(d.get("licenses", [])))' "$RUNNER_TEMP/about.json")"
+          {
+            echo "### Licences des dépendances (cargo-about $CARGO_ABOUT_VERSION, bloquante)"
+            echo
+            echo "Crates du build web et textes de licence : $n ; agrégés dans \`LICENSES/THIRD-PARTY-LICENSES.txt\`."
+            echo
+          } >> "$REPORT"
+
       - name: Empaquetage du site statique
         id: pkg
         env:
           NAME: ${{ steps.meta.outputs.name }}
-          EPOCH: ${{ steps.meta.outputs.epoch }}
-          COMMIT: ${{ steps.meta.outputs.commit }}
           CRAFT_FONTS_DIR: ${{ github.workspace }}/evora-ci/craft-fonts
         run: |
           set -euo pipefail
@@ -216,6 +294,49 @@ jobs:
           for f in "$CRAFT_FONTS_DIR"/fonts/*/OFL.txt; do
             if [ -f "$f" ]; then cp "$f" "$PKG/LICENSES/OFL-$(basename "$(dirname "$f")").txt"; fi
           done
+          # Licences des dépendances Rust (cargo-about).
+          cp "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt" "$PKG/LICENSES/THIRD-PARTY-LICENSES.txt"
+          {
+            echo "work=$WORK"
+            echo "pkg=$PKG"
+            echo "out=$OUT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Portes du bundle (marques E1, hébergement, émojis E10 ; bloquantes)
+        env:
+          PKG: ${{ steps.pkg.outputs.pkg }}
+          REPORT: ${{ steps.meta.outputs.report }}
+        run: python3 -I .github/evora/gates.py check "$PKG" "$GITHUB_WORKSPACE" "$REPORT"
+
+      - name: Empreintes CSP, précompression et taille
+        env:
+          PKG: ${{ steps.pkg.outputs.pkg }}
+          OUT: ${{ steps.pkg.outputs.out }}
+          REPORT: ${{ steps.meta.outputs.report }}
+        run: |
+          set -euo pipefail
+          python3 -I .github/evora/gates.py csp "$PKG" "$PKG/csp-hashes.txt"
+          cp "$PKG/csp-hashes.txt" "$OUT/csp-hashes.txt"
+          python3 -I .github/evora/gates.py compress "$PKG"
+          python3 -I .github/evora/gates.py sizes "$PKG" "$REPORT"
+          {
+            echo "### Empreintes CSP des scripts inline (csp-hashes.txt)"
+            echo
+            sed 's/^/- `/; s/$/`/' "$PKG/csp-hashes.txt"
+            echo
+          } >> "$REPORT"
+
+      - name: Archive, SHA256SUMS et BUILD-INFO
+        env:
+          NAME: ${{ steps.meta.outputs.name }}
+          EPOCH: ${{ steps.meta.outputs.epoch }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+          WORK: ${{ steps.pkg.outputs.work }}
+          PKG: ${{ steps.pkg.outputs.pkg }}
+          OUT: ${{ steps.pkg.outputs.out }}
+          REPORT: ${{ steps.meta.outputs.report }}
+        run: |
+          set -euo pipefail
           # Archive reproductible : dates fixées au commit, ordre trié, sans attributs étendus.
           find "$PKG" -exec touch -h -d "@$EPOCH" {} +
           (cd "$WORK" && find "$NAME" -print | LC_ALL=C sort | zip -X -9 -q -@ "$OUT/$NAME.zip")
@@ -228,120 +349,44 @@ jobs:
             echo "trunk: $(trunk --version)"
             echo "wasm-bindgen: $(wasm-bindgen --version)"
             echo "wasm-opt: $(wasm-opt --version)"
+            echo "cargo-deny: $(cargo-deny --version)"
+            echo "cargo-about: $(cargo-about --version)"
             echo "craft-fonts: $CRAFT_FONTS_REF"
             echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > "$OUT/BUILD-INFO.txt"
-          (cd "$OUT" && sha256sum "$NAME.zip" BUILD-INFO.txt > SHA256SUMS)
+          (cd "$OUT" && sha256sum "$NAME.zip" BUILD-INFO.txt csp-hashes.txt > SHA256SUMS)
           cat "$OUT/SHA256SUMS"
           ls -l "$OUT"
           {
-            echo "pkg=$PKG"
-            echo "out=$OUT"
-          } >> "$GITHUB_OUTPUT"
+            echo "### Archive"
+            echo
+            echo "| Fichier | Octets | SHA-256 |"
+            echo "|---|---|---|"
+            for f in "$NAME.zip" BUILD-INFO.txt csp-hashes.txt; do
+              echo "| \`$f\` | $(stat -c %s "$OUT/$f") | \`$(sha256sum "$OUT/$f" | cut -d' ' -f1)\` |"
+            done
+            echo
+          } >> "$REPORT"
 
-      - name: Garde-fous (non bloquants pour cette première passe)
-        continue-on-error: true
+      - name: Test de fumée Chrome, origine croisée (bloquant)
         env:
-          NAME: ${{ steps.meta.outputs.name }}
-          TAG: ${{ steps.meta.outputs.tag }}
-          COMMIT: ${{ steps.meta.outputs.commit }}
           PKG: ${{ steps.pkg.outputs.pkg }}
-          OUT: ${{ steps.pkg.outputs.out }}
+          REPORT: ${{ steps.meta.outputs.report }}
         run: |
-          # Mesure seulement : GitHub lance bash avec -e et pipefail ; un grep sans correspondance
-          # (statut 1) ne doit pas interrompre le relevé.
-          set +e
-          set -uo pipefail
-          REPORT="$RUNNER_TEMP/evora-garde-fous.md"
-          : > "$REPORT"
-          # Nombre d'occurrences d'un motif dans un fichier (0 si absent). $3 : option de grep.
-          count() { { grep -a -o ${3:-} -- "$1" "$2" || true; } | wc -l; }
-          zip_bytes="$(stat -c %s "$OUT/$NAME.zip")"
-          zip_sha="$(sha256sum "$OUT/$NAME.zip" | cut -d' ' -f1)"
-          {
-            echo "## Evora : pdfcraft web $TAG"
-            echo
-            echo "| Élément | Valeur |"
-            echo "|---|---|"
-            echo "| Commit | \`$COMMIT\` |"
-            echo "| Archive | \`$NAME.zip\`, $zip_bytes octets |"
-            echo "| SHA-256 de l'archive | \`$zip_sha\` |"
-            echo "| rustc | $(rustc --version) |"
-            echo "| Trunk | $(trunk --version) |"
-            echo "| wasm-bindgen | $(wasm-bindgen --version) |"
-            echo "| wasm-opt | $(wasm-opt --version) |"
-            echo "| craft-fonts | \`$CRAFT_FONTS_REF\` |"
-            echo
-            echo "### Garde-fous (mesure, non bloquants)"
-            echo
-          } >> "$REPORT"
+          set -euo pipefail
+          google-chrome --version
+          python3 -I .github/evora/smoke.py "$PKG" "$PKG/csp-hashes.txt" "$GITHUB_WORKSPACE/evora-ci/smoke" "$REPORT"
 
-          # 1. Fichiers d'hébergement dans le paquet (attendu : aucun).
-          hosting="$(find "$PKG" \( -name '_headers' -o -name '.htaccess' -o -name '*.conf' -o -name 'web.config' \) -print)"
-          n_hosting="$(printf '%s' "$hosting" | { grep -c . || true; })"
-          {
-            echo "**Fichiers d'hébergement** (_headers, .htaccess, *.conf, web.config) : $n_hosting"
-            if [ "$n_hosting" -gt 0 ]; then printf '%s\n' "$hosting" | sed "s|$PKG/|- |"; fi
-            echo
-          } >> "$REPORT"
-          if [ "$n_hosting" -gt 0 ]; then echo "::warning::$n_hosting fichier(s) d'hébergement dans le paquet"; fi
-
-          # 2. Taille des .wasm (brut, gzip -9, brotli -q 11 si disponible) et du site.
-          {
-            echo "**Taille des .wasm**"
-            echo
-            echo "| Fichier | Brut (octets) | gzip -9 | brotli -q 11 |"
-            echo "|---|---|---|---|"
-          } >> "$REPORT"
-          while IFS= read -r -d '' w; do
-            raw="$(stat -c %s "$w")"
-            gz="$(gzip -9 -c "$w" | wc -c)"
-            if command -v brotli >/dev/null; then br="$(brotli -q 11 -c "$w" | wc -c)"; else br="n/d"; fi
-            echo "| \`${w#"$PKG"/}\` | $raw | $gz | $br |" >> "$REPORT"
-            echo "::notice::${w#"$PKG"/} : $raw octets bruts, $gz en gzip -9, $br en brotli -q 11"
-          done < <(find "$PKG" -name '*.wasm' -print0)
-          {
-            echo
-            echo "Site complet : $(du -sb "$PKG" | cut -f1) octets ; fichiers : $(find "$PKG" -type f | wc -l)"
-            echo
-          } >> "$REPORT"
-
-          # 3. Marques ArtCraft dans le bundle (mesure de la future cible E1, hors LICENSES/
-          #    où la mention en texte simple est permise).
-          {
-            echo "**Occurrences de marques** (cible E1 : 0 hors LICENSES/)"
-            echo
-            echo "| Fichier | ArtCraft | artcraft (casse ignorée) | discord.gg | getartcraft (casse ignorée) |"
-            echo "|---|---|---|---|---|"
-          } >> "$REPORT"
-          site_ai=0; site_d=0; site_g=0; lic_ai=0
-          while IFS= read -r -d '' f; do
-            a="$(count 'ArtCraft' "$f")"
-            ai="$(count 'artcraft' "$f" -i)"
-            d="$(count 'discord.gg' "$f" -F)"
-            g="$(count 'getartcraft' "$f" -i)"
-            rel="${f#"$PKG"/}"
-            if [ "$((a + ai + d + g))" -gt 0 ]; then
-              echo "| \`$rel\` | $a | $ai | $d | $g |" >> "$REPORT"
-            fi
-            case "$rel" in
-              LICENSES/*) lic_ai=$((lic_ai + ai)) ;;
-              *) site_ai=$((site_ai + ai)); site_d=$((site_d + d)); site_g=$((site_g + g)) ;;
-            esac
-          done < <(find "$PKG" -type f -print0 | LC_ALL=C sort -z)
-          {
-            echo
-            echo "Hors LICENSES/ : artcraft **$site_ai**, discord.gg **$site_d**, getartcraft **$site_g** ; dans LICENSES/ : artcraft $lic_ai"
-          } >> "$REPORT"
-          if [ "$site_ai" -gt 0 ]; then
-            echo "::warning::$site_ai occurrence(s) de la marque ArtCraft dans le bundle hors LICENSES/ (cible E1 : 0)"
+      - name: Rapport des portes
+        if: always()
+        env:
+          REPORT: ${{ steps.meta.outputs.report }}
+        run: |
+          if [ -f "$REPORT" ]; then
+            cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+            echo "----- rapport des portes -----"
+            cat "$REPORT"
           fi
-          echo "::notice::garde-fous : hebergement=$n_hosting artcraft_site=$site_ai discord_site=$site_d getartcraft_site=$site_g artcraft_licences=$lic_ai"
-
-          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
-          echo "----- résumé du job -----"
-          cat "$REPORT"
-          exit 0
 
       - name: Artefact du run
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -349,3 +394,11 @@ jobs:
           name: ${{ steps.meta.outputs.name }}
           path: evora-ci/out/
           if-no-files-found: error
+
+      - name: Traces du test de fumée
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evora-smoke-${{ steps.meta.outputs.tag }}
+          path: evora-ci/smoke/
+          if-no-files-found: ignore
