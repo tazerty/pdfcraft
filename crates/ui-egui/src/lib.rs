@@ -88,6 +88,8 @@ mod edit_text_ui;
 pub mod field_table_ui;
 pub use edit_text_ui::CropMode;
 mod editing;
+// Evora (E7): neutralised commands (update check, outbound project links).
+mod evora;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_watch;
 mod files;

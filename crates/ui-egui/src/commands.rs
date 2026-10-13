@@ -114,6 +114,10 @@ impl PdfCraftApp {
     }
 
     fn execute_unguarded(&mut self, id: &str) -> bool {
+        // Evora (E7): neutralised commands are consumed and do nothing.
+        if crate::evora::hidden(id) {
+            return true;
+        }
         let Some(spec) = commands::command(id) else { return false };
         if !self.command_enabled(spec) {
             let why = match spec.needs {
@@ -789,7 +793,8 @@ fn tab_after(current: Option<usize>, count: usize, forward: bool) -> Option<usiz
 
 /// Render a top-level menu's registered commands (with live labels, shortcuts and enablement).
 pub(crate) fn registry_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, menu: &str) {
-    for spec in commands::menu(menu) {
+    // Evora (E7): neutralised commands stay out of the menus.
+    for spec in commands::menu(menu).filter(|spec| !crate::evora::hidden(spec.id)) {
         let label = commands::current_label(spec, &app.session, app.active_ids().map(|(_, id)| id));
         let label = crate::i18n::menu_label(spec.id, &label);
         // Open Recent is a submenu of the live recent list, not one action: disabled while the

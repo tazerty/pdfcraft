@@ -517,7 +517,8 @@ pub fn community_links(ui: &mut egui::Ui) -> Option<&'static str> {
     let mut clicked = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        for l in pdfcraft_engine::links::LINKS {
+        // Evora (E7): neutralised links are not offered.
+        for l in pdfcraft_engine::links::LINKS.iter().filter(|l| !crate::evora::hidden(l.command)) {
             if icon_pill(ui, l.icon, tl!(l.label), false).on_hover_text(l.url).clicked() {
                 clicked = Some(l.command);
             }

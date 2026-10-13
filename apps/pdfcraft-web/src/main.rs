@@ -31,30 +31,8 @@ fn main() {
                     if let Some(json) = cc.storage.and_then(|s| s.get_string("pdfcraft").or_else(|| s.get_string("printcraft"))) {
                         app.restore(&json);
                     }
-                    // `?file=<url>` opens a PDF from a URL (same-origin or CORS-enabled).
-                    if let Some(url) = query_param("file") {
-                        let inbox = app.startup_inbox.clone();
-                        let failed = app.failed_inbox.clone();
-                        let ctx = cc.egui_ctx.clone();
-                        wasm_bindgen_futures::spawn_local(async move {
-                            let name = url.rsplit('/').next().unwrap_or("document.pdf").split('?').next().unwrap_or("document.pdf").to_string();
-                            match fetch_bytes(&url).await {
-                                Ok(bytes) => {
-                                    if let Ok(mut q) = inbox.lock() {
-                                        q.push((name, bytes));
-                                    }
-                                }
-                                Err(e) => {
-                                    eframe::web_sys::console::error_1(&format!("PdfCraft: could not fetch {url}: {e}").into());
-                                    // Shown in the app too, not only in the console (#173).
-                                    if let Ok(mut q) = failed.lock() {
-                                        q.push((name, e));
-                                    }
-                                }
-                            }
-                            ctx.request_repaint();
-                        });
-                    }
+                    // Evora (E7): no `?file=<url>`. The engine fetches nothing named by its URL;
+                    // documents come from the host page only (EHP, HOST-PROTOCOL.md §2.4, §5.4).
                     // eframe never raises a close request on a browser reload or tab close, so `guard_quit` never
                     // prompts; ask the browser to confirm instead while a document has unsaved work (#812).
                     warn_before_unload(app.unsaved_flag.clone());
@@ -112,19 +90,6 @@ fn warn_before_unload(unsaved: std::sync::Arc<std::sync::atomic::AtomicBool>) {
 fn query_param(key: &str) -> Option<String> {
     let search = web_sys::window()?.location().search().ok()?;
     web_sys::UrlSearchParams::new_with_str(&search).ok()?.get(key)
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
-    use eframe::wasm_bindgen::JsCast;
-    let window = web_sys::window().ok_or("no window")?;
-    let resp = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url)).await.map_err(|e| format!("{e:?}"))?;
-    let resp: web_sys::Response = resp.dyn_into().map_err(|_| "not a response")?;
-    if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    let buf = wasm_bindgen_futures::JsFuture::from(resp.array_buffer().map_err(|e| format!("{e:?}"))?).await.map_err(|e| format!("{e:?}"))?;
-    Ok(js_sys::Uint8Array::new(&buf).to_vec())
 }
 
 /// The `postMessage` bridge to a same-origin parent page. Messages are plain objects with a
