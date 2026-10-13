@@ -2,8 +2,8 @@
 """Portes Evora sur le site web empaqueté (écrit pour le fork tazerty/pdfcraft, stdlib seule).
 
 Sous-commandes :
-  check PKG REPO REPORT      porte des marques (E1), des fichiers d'hébergement et des émojis (E10) ;
-                             statut 1 si une porte bloquante échoue.
+  check PKG REPO REPORT      portes des marques (E1), des fichiers d'hébergement, des émojis (E10) et
+                             des termes sensibles à l'affichage (E9) ; statut 1 si une porte échoue.
   csp PKG OUT                empreintes sha256-… des scripts inline d'index.html (CSP), une par ligne.
   compress PKG               fichiers .br (brotli -q 11) et .gz (gzip -9 -n) à côté de chaque ressource web.
   sizes PKG REPORT           tailles (.wasm brut, .br, .gz ; site complet).
@@ -31,6 +31,12 @@ LICENCES_DIR = "LICENSES"
 
 # Catalogues affichés (E10) : catalogues TSV et chaînes du code d'interface.
 CATALOG_DIR = "crates/ui-egui/src/i18n"
+# Termes sensibles renommés à l'affichage (E9, D-16), casse exacte.
+SENSITIVE = ("Lumetri", "Lightroom", "Acrobat", "Premiere", "Adobe", "Cycore")
+OVERRIDES = "crates/ui-egui/src/i18n/evora-overrides.txt"
+# Chaînes anglaises affichées (par tl!/tr, ou brutes pour les messages du moteur).
+E9_SOURCE_DIRS = (("crates/ui-egui/src", False), ("apps/pdfcraft-web/src", False), ("crates/engine/src", True))
+STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
 UI_SOURCE_DIRS = ("crates/ui-egui/src", "crates/engine/src", "apps/pdfcraft-web/src")
 E10_BASELINE = ".github/evora/e10-baseline.txt"
 
@@ -206,9 +212,123 @@ def check_emoji(repo, report):
     return not over
 
 
+def read_overrides(repo):
+    rules = []
+    with open(os.path.join(repo, OVERRIDES), encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if len(cols) == 3 and cols[1]:
+                rules.append(tuple(cols))
+    return rules
+
+
+def apply_overrides(rules, lang, text):
+    """Même algorithme que i18n::evora_display (ui-egui) : règles de la langue et « * », dans l'ordre."""
+    for rule_lang, src, dst in rules:
+        if rule_lang in ("*", lang) and src in text:
+            text = text.replace(src, dst)
+    return text
+
+
+def residual_terms(text):
+    return [t for t in SENSITIVE if t in text]
+
+
+def check_terms(repo, report):
+    log(report, "### Porte des termes sensibles à l'affichage (E9, bloquante)")
+    log(report)
+    rules = read_overrides(repo)
+    before = {t: 0 for t in SENSITIVE}
+    after = {t: 0 for t in SENSITIVE}
+    leftovers = []
+    base = os.path.join(repo, CATALOG_DIR)
+    for name in sorted(os.listdir(base)):
+        if not name.endswith(".tsv"):
+            continue
+        lang = name[:-4]
+        with open(os.path.join(base, name), encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                shown = unescape_tsv(parts[2])
+                for t in residual_terms(shown):
+                    before[t] += 1
+                left = residual_terms(apply_overrides(rules, lang, shown))
+                for t in left:
+                    after[t] += 1
+                if left:
+                    leftovers.append((f"{CATALOG_DIR}/{name}", shown[:100]))
+    for d, raw_messages in E9_SOURCE_DIRS:
+        for path in walk_files(os.path.join(repo, d)):
+            if not path.endswith(".rs") or os.path.basename(path) == "tests.rs" or "/tests/" in path:
+                continue
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    if line.lstrip().startswith("//"):
+                        continue
+                    if "evora-gates: allow" in line:
+                        continue  # liste de termes du détecteur au rendu lui-même
+                    for lit in STRING_LITERAL.findall(line):
+                        if not residual_terms(lit):
+                            continue
+                        for t in residual_terms(lit):
+                            before[t] += 1
+                        shown = [apply_overrides(rules, "en", lit)]
+                        if raw_messages:
+                            shown.append(apply_overrides(rules, "msg", lit))
+                        left = sorted({t for s in shown for t in residual_terms(s)})
+                        for t in left:
+                            after[t] += 1
+                        if left:
+                            leftovers.append((rel(path, repo), lit[:100]))
+    log(report, f"Règles de surcharge ({OVERRIDES}) : {len(rules)}")
+    log(report)
+    log(report, "| Terme | Occurrences dans les chaînes affichables | Après surcharge |")
+    log(report, "|---|---|---|")
+    for t in SENSITIVE:
+        log(report, f"| {t} | {before[t]} | **{after[t]}** |")
+    log(report)
+    absent = [t for t in SENSITIVE if before[t] == 0]
+    log(report, f"Termes absents de ce dépôt (sans objet, mesuré) : {', '.join(absent) if absent else 'aucun'}")
+    for f, text in leftovers:
+        log(report, f"- reste dans `{f}` : {text}")
+    log(report)
+    total = sum(after.values())
+    print(f"::notice::termes sensibles affichés après surcharge : {total} (avant : {sum(before.values())})")
+    if total:
+        print("::error::terme sensible non couvert par le catalogue de surcharge (E9)")
+    return total == 0
+
+
+def bundle_terms(pkg, report):
+    """Information, non bloquante : termes présents dans les octets du bundle (moteur, clés)."""
+    counts = {t: 0 for t in SENSITIVE}
+    for path in walk_files(pkg):
+        r = rel(path, pkg)
+        if r.endswith((".br", ".gz")) or r.split("/", 1)[0] == LICENCES_DIR:
+            continue
+        with open(path, "rb") as fh:
+            data = fh.read()
+        for t in SENSITIVE:
+            counts[t] += data.count(t.encode())
+    log(report, "Information (non bloquante) : occurrences brutes dans le bundle hors LICENSES/, où restent les "
+                "clés anglaises des catalogues, les règles de surcharge et les chaînes internes du moteur, "
+                "non affichées ou affichées après surcharge : "
+                + ", ".join(f"{t} {n}" for t, n in counts.items()))
+    log(report)
+
+
 def cmd_check(pkg, repo, report_path):
     with open(report_path, "a", encoding="utf-8") as report:
-        results = [check_brands(pkg, report), check_hosting(pkg, report), check_emoji(repo, report)]
+        results = [check_brands(pkg, report), check_hosting(pkg, report), check_emoji(repo, report),
+                   check_terms(repo, report)]
+        bundle_terms(pkg, report)
     return 0 if all(results) else 1
 
 

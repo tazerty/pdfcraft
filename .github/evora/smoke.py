@@ -372,15 +372,16 @@ def run_scenario(name, site, csp, out_dir, chrome_bin):
             if result["gl"] != "webgl2":
                 errors.append(f"[test] contexte du canvas : {result['gl']} (attendu : webgl2)")
             if "evora-audit=1" in ENGINE_QUERY:
-                # E10 vérifié au rendu : le moteur audite chaque texte dessiné (window.__evoraE10).
-                audit = chrome.call("Runtime.evaluate", {"expression": "JSON.stringify(window.__evoraE10 || null)",
+                # E9 et E10 vérifiés au rendu : le moteur audite chaque texte dessiné (window.__evoraAudit).
+                audit = chrome.call("Runtime.evaluate", {"expression": "JSON.stringify(window.__evoraAudit || null)",
                                                          "contextId": ctx, "returnByValue": True}, sess)
-                e10 = json.loads(audit.get("result", {}).get("value", "null") or "null")
-                result["e10"] = e10
-                if not e10 or not e10.get("frames") or not e10.get("texts") or e10.get("selftest") is not True:
-                    errors.append(f"[test] audit E10 au rendu absent, sans image, sans texte ou détecteur muet : {e10}")
-                elif e10.get("hits"):
-                    errors.append(f"[test] audit E10 au rendu : {e10['hits']} émoji(s) dessiné(s), ex. « {e10.get('sample', '')} »")
+                a = json.loads(audit.get("result", {}).get("value", "null") or "null")
+                result["audit"] = a
+                if not a or not a.get("frames") or not a.get("texts") or a.get("selftest") is not True:
+                    errors.append(f"[test] audit au rendu absent, sans image, sans texte ou détecteur muet : {a}")
+                elif a.get("emoji") or a.get("terms"):
+                    errors.append(f"[test] audit au rendu : {a.get('emoji')} émoji(s) (E10) et {a.get('terms')} terme(s) "
+                                  f"sensible(s) (E9) dessinés, ex. « {a.get('sample', '')} »")
             res = chrome.call("Runtime.evaluate", {"expression": RESOURCES, "contextId": ctx, "returnByValue": True}, sess)
             result["resources"] = json.loads(res.get("result", {}).get("value", "[]"))
             msgs = chrome.call("Runtime.evaluate", {"expression": "JSON.stringify(window.__evoraMessages || [])",
@@ -445,8 +446,8 @@ def main(argv):
             if wasm:
                 log(f"- {r['scenario']} : .wasm chargé en {wasm[0]['dur']} ms ({wasm[0]['size']} octets transférés, sans compression HTTP)")
             log(f"- {r['scenario']} : messages reçus par la page parente : {r.get('parent_messages', [])}")
-            if "e10" in r:
-                log(f"- {r['scenario']} : audit E10 au rendu (window.__evoraE10) : {r['e10']}")
+            if "audit" in r:
+                log(f"- {r['scenario']} : audit au rendu E9/E10 (window.__evoraAudit) : {r['audit']}")
             for e in r["errors"]:
                 log(f"  - {e}")
         log()

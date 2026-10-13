@@ -1527,7 +1527,8 @@ impl PdfCraftApp {
     }
 
     pub fn notify(&mut self, msg: impl Into<String>) {
-        self.toast = Some((msg.into(), 0.0));
+        // Evora (E9): exact-phrase display overrides for raw engine messages.
+        self.toast = Some((crate::i18n::evora_message(msg.into()), 0.0));
     }
 
     /// Notify with a static message in the UI language.
