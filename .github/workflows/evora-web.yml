@@ -16,8 +16,9 @@
 #
 # Portes BLOQUANTES (patch E1 posé) : cargo-deny (advisories, bans, licences, sources) ;
 # cargo-about (LICENSES/ agrégé) ; marques ArtCraft dans le bundle (0 hors LICENSES/) ; fichiers
-# d'hébergement (0) ; émojis des catalogues affichés (E10, ligne de base décroissante) ; empreintes
-# CSP des scripts inline ; test de fumée Chrome depuis une origine différente (avec et sans CSP).
+# d'hébergement (0) ; émojis des catalogues affichés (E10) ; termes sensibles affichés après le
+# catalogue de surcharge (E9) ; empreintes CSP des scripts inline ; test de fumée Chrome depuis une
+# origine différente (avec et sans CSP), avec audit au rendu des émojis et des termes (E9, E10).
 # Mesures imprimées : taille du .wasm (brut, .br, .gz), démarrage à froid.
 #
 # Sortie : artefact de run evora-colophon-atelier-web-<tag> (archive .zip avec .br/.gz, LICENSES/
@@ -304,7 +305,7 @@ jobs:
             echo "out=$OUT"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Portes du bundle (marques E1, hébergement, émojis E10 ; bloquantes)
+      - name: Portes du bundle (marques E1, hébergement, émojis E10, termes sensibles E9 ; bloquantes)
         env:
           PKG: ${{ steps.pkg.outputs.pkg }}
           REPORT: ${{ steps.meta.outputs.report }}
@@ -374,7 +375,7 @@ jobs:
         env:
           PKG: ${{ steps.pkg.outputs.pkg }}
           REPORT: ${{ steps.meta.outputs.report }}
-          # E10 vérifié au rendu : le moteur audite chaque texte dessiné (window.__evoraE10).
+          # E9 et E10 vérifiés au rendu : le moteur audite chaque texte dessiné (window.__evoraAudit).
           EVORA_SMOKE_QUERY: "?evora-audit=1"
         run: |
           set -euo pipefail

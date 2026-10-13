@@ -23,7 +23,7 @@ fn main() {
                 options,
                 Box::new(|cc| {
                     let mut app = PdfCraftApp::new();
-                    // Evora (E10): `?evora-audit=1` (CI smoke test) audits every text drawn for emoji.
+                    // Evora (E9, E10): `?evora-audit=1` (CI smoke test) audits every text drawn.
                     if query_param("evora-audit").as_deref() == Some("1") {
                         cc.egui_ctx.add_plugin(e10::Audit::default());
                     }
@@ -260,9 +260,10 @@ mod host {
     }
 }
 
-/// Evora (E10): render-time audit of the "no emoji in the interface" rule, for the CI smoke test.
-/// With `?evora-audit=1`, every text egui draws is checked just before it reaches the screen, and
-/// the running totals are published as `window.__evoraE10 = { frames, texts, hits, sample }`.
+/// Evora (E9, E10): render-time audit for the CI smoke test. With `?evora-audit=1`, every text egui
+/// draws is checked just before it reaches the screen for emoji (E10) and for third-party product
+/// names (E9), and the running totals are published as
+/// `window.__evoraAudit = { frames, texts, emoji, terms, sample, selftest }`.
 #[cfg(target_arch = "wasm32")]
 mod e10 {
     use eframe::wasm_bindgen::JsValue;
@@ -295,18 +296,32 @@ mod e10 {
             )
     }
 
+    /// Product names the interface must not show (E9, see ui-egui `i18n/evora-overrides.txt`).
+    const SENSITIVE: [&str; 6] = ["Lumetri", "Lightroom", "Acrobat", "Premiere", "Adobe", "Cycore"]; // evora-gates: allow
+
     #[derive(Default)]
     pub struct Audit {
         frames: u64,
         texts: u64,
-        hits: u64,
+        emoji: u64,
+        terms: u64,
         sample: String,
     }
 
-    /// The detector catches a known dingbat (U+2713) and lets through a letter and the menu
-    /// separator U+25B8: the CI requires it, so a detector that never fires can't pass for green.
+    fn sensitive_terms(text: &str) -> u64 {
+        SENSITIVE.iter().filter(|term| text.contains(**term)).count() as u64
+    }
+
+    /// The detectors fire on known samples (U+2713, U+1F600, a product name) and stay quiet on a
+    /// letter, the menu separator U+25B8 and a neutral label: the CI requires it, so a detector that
+    /// never fires can't pass for green.
     fn selftest() -> bool {
-        is_emoji_like('\u{2713}') && is_emoji_like('\u{1F600}') && !is_emoji_like('A') && !is_emoji_like('\u{25B8}')
+        is_emoji_like('\u{2713}')
+            && is_emoji_like('\u{1F600}')
+            && !is_emoji_like('A')
+            && !is_emoji_like('\u{25B8}')
+            && sensitive_terms(SENSITIVE[2]) == 1
+            && sensitive_terms("Enable PDF JavaScript") == 0
     }
 
     impl Audit {
@@ -319,11 +334,14 @@ mod e10 {
                 }
                 egui::Shape::Text(text) => {
                     self.texts += 1;
-                    let found = text.galley.text().chars().filter(|c| is_emoji_like(*c)).count() as u64;
-                    if found > 0 {
-                        self.hits += found;
+                    let shown = text.galley.text();
+                    let emoji = shown.chars().filter(|c| is_emoji_like(*c)).count() as u64;
+                    let terms = sensitive_terms(shown);
+                    if emoji + terms > 0 {
+                        self.emoji += emoji;
+                        self.terms += terms;
                         if self.sample.is_empty() {
-                            self.sample = text.galley.text().chars().take(120).collect();
+                            self.sample = shown.chars().take(120).collect();
                         }
                     }
                 }
@@ -337,19 +355,20 @@ mod e10 {
             for (key, value) in [
                 ("frames", JsValue::from_f64(self.frames as f64)),
                 ("texts", JsValue::from_f64(self.texts as f64)),
-                ("hits", JsValue::from_f64(self.hits as f64)),
+                ("emoji", JsValue::from_f64(self.emoji as f64)),
+                ("terms", JsValue::from_f64(self.terms as f64)),
                 ("sample", JsValue::from_str(&self.sample)),
                 ("selftest", JsValue::from_bool(selftest())),
             ] {
                 let _ = js_sys::Reflect::set(&report, &JsValue::from_str(key), &value);
             }
-            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__evoraE10"), &report);
+            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__evoraAudit"), &report);
         }
     }
 
     impl egui::Plugin for Audit {
         fn debug_name(&self) -> &'static str {
-            "evora-e10-audit"
+            "evora-display-audit"
         }
 
         fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {

@@ -1,0 +1,23 @@
+# Evora display overrides (patch E9, Evora decision D-16): third-party product names are renamed
+# where the interface SHOWS them, in every language (English included), without touching the
+# engine crates. Format: language<TAB>text<TAB>replacement, applied in file order to every
+# translation when its catalog loads and to English strings when they are looked up.
+# Language: a catalog code (fr, de, …), "en" for English, "*" for every language, or "msg" for
+# raw engine messages shown in notifications (exact phrases only, so file names stay intact).
+# Language-specific forms (possessives, inflections) come before the general rules.
+# Encryption levels are named after the PDF version that introduced them (ISO 32000).
+en	Acrobat's	the PDF
+en	Acrobat may show	other PDF viewers may show
+fr	d'Acrobat	du PDF
+cs	Acrobatu	PDF
+pl	Acrobata	PDF
+sl	Acrobatove standardne funkcije	standardne funkcije PDF
+tr	Acrobat'ın	PDF'in
+hu	az Acrobat	a PDF
+it	JavaScript di Acrobat	JavaScript PDF
+*	Acrobat X	PDF 2.0
+*	Acrobat 7.0	PDF 1.6
+*	Acrobat 5.0	PDF 1.4
+*	Acrobat 3.0	PDF 1.1
+*	Acrobat	PDF
+msg	(Acrobat X and later)	(PDF 2.0 and later)
