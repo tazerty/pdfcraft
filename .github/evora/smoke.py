@@ -9,10 +9,17 @@ Chrome (préinstallé sur le runner) est piloté par le protocole DevTools sur t
   origine B (parente) : http://localhost:<port B>/  sert une page qui encadre A dans une iframe.
 
 Deux origines (hôtes et ports distincts, donc deux sites : la situation du mode B d'Evora).
-Deux scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
-  1. « sans CSP » ;
-  2. « CSP appliquée » : la CSP cible des documents moteur (ARCHITECTURE §3.6), avec les
-     empreintes de csp-hashes.txt et frame-ancestors limité à l'origine B.
+Scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
+  1. « sans CSP » ; 2. « CSP appliquée » : la CSP cible des documents moteur (ARCHITECTURE §3.6),
+     avec les empreintes de csp-hashes.txt et frame-ancestors limité à l'origine B ;
+  3. « fr-sombre » (E3) ; 4. « pont-ehp » (E4, E5) ; 5. « hors-pont » (E5, amont inchangé sans pont) ;
+  6. « pont-ehp-temoin » : le scénario 4 sur un moteur SABORDÉ (removeItem sans effet), qui DOIT
+     être rouge, et rouge par les seuls détecteurs du stockage : la preuve que le banc sait rougir.
+
+Le scénario « pont-ehp » ajoute deux documents à la page parente : un observateur servi par
+l'origine A (même stockage que le moteur, il lit le localStorage à l'arrivée de chaque accusé
+d'evora:init et d'evora:purge) et une page intruse d'une TROISIÈME origine (http://localhost:<port C>,
+non admise par evora-host.json) qui envoie au moteur des messages EHP bien formés.
 
 Succès d'un scénario : le canvas #pdfcraft existe et eframe l'a dimensionné (largeur = largeur CSS ×
 devicePixelRatio, différente des 300 px par défaut), son contexte WebGL2 est vivant, et ni la page
@@ -30,6 +37,7 @@ import functools
 import http.server
 import json
 import os
+import re
 import select
 import shutil
 import socket
@@ -40,8 +48,33 @@ import time
 
 PORT_A = 8801
 PORT_B = 8802
+PORT_C = 8803
 ENGINE_ORIGIN = f"http://127.0.0.1:{PORT_A}"
 PARENT_ORIGIN = f"http://localhost:{PORT_B}"
+# Troisième origine, NON admise par evora-host.json : la page intruse du scénario « pont-ehp ».
+INTRUDER_ORIGIN = f"http://localhost:{PORT_C}"
+# E5 : espaces de noms (storageNs, 64 hexa) du compte courant et de deux autres comptes.
+NS_OWN, NS_OTHER, NS_OTHER2 = "ab" * 32, "cd" * 32, "ef" * 32
+NS_PREFIX = "evora.pdfcraft."
+# Clés que le moteur écrit hors espace de noms sur son origine (amont, ancien nom, mémoire d'eframe).
+LOOSE_KEYS = ("pdfcraft", "printcraft", "egui_memory_ron")
+# Clé qui n'appartient pas au moteur (une autre app de l'origine, en mode A) : aucune purge n'y touche.
+WITNESS_KEY = "evora-witness"
+# Ids ULID des messages de la page intruse (préfixe distinct de ceux de la page parente).
+INTRUDER_IDS = ["01J" + "Y" * 22 + c for c in "ABC"]
+ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
+SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$")
+CAPABILITY_NAMES = {"doc.open", "doc.save", "doc.saved-ack", "doc.dirty", "doc.multi", "doc.request-save",
+                    "export.drive", "media.need", "media.ranges", "pick.drive", "command", "storage.ns",
+                    "storage.memory", "storage.purge", "live.lang", "live.theme", "font.inject", "author"}
+# Charges utiles admises du moteur vers la coquille : (champs obligatoires, champs permis), §4.4-§4.5.
+PAYLOAD_KEYS = {
+    "evora:ready": ({"app", "version", "ehp", "capabilities"}, {"app", "version", "ehp", "capabilities"}),
+    "evora:ack": ({"ok"}, {"ok", "code", "result"}),
+    "evora:dirty": ({"dirty"}, {"dirty", "docRef"}),
+    "evora:save": ({"docRef", "name", "saveAs", "bytes"}, {"docRef", "name", "saveAs", "bytes"}),
+    "evora:failed": ({"code"}, {"code"}),
+}
 IFRAME_W, IFRAME_H = 1280, 800
 # Paramètres de l'URL du moteur dans l'iframe. Avant le pont EHP natif (E4), aucun : le pont amont
 # ?host=parent ne parle qu'à sa propre origine et Chrome signalerait chaque envoi refusé.
@@ -88,53 +121,132 @@ def minimal_pdf():
 
 
 # Coquille minimale (page parente du scénario « pont-ehp », HOST-PROTOCOL.md) : vérifie source et
-# origine, répond à evora:ready par un evora:init invalide (v: 2, doit rester sans réponse) puis par
-# un evora:init valide, puis ouvre un PDF par evora:open. Tout ce qui arrive est journalisé.
+# origine, journalise tout ce qui arrive (horodaté), attend que le banc ait semé le stockage du moteur
+# (window.__evoraGo) pour envoyer un evora:init de version 2 (doit rester sans réponse) puis un
+# evora:init valide, ouvre un PDF par evora:open dès l'accusé d'init, répond evora:saved à un
+# evora:save, et fait lire le stockage du moteur par l'observateur à l'arrivée de chaque accusé
+# d'evora:init et d'evora:purge. Le banc envoie le reste par window.__evoraSend.
 HOST_HARNESS = """
 const ENGINE = "%(engine)s";
 const A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 let n = 0;
 const ulid = () => { n += 1; return "01JZZZZZZZZZZZZZZZZZZZZZ" + A[(n >> 5) %% 32] + A[n %% 32]; };
 const PDF = "%(pdf)s";
+const now = () => performance.timeOrigin + performance.now();
 const ids = window.__evoraIds = {};
 const log = window.__evoraLog = [];
+const obs = window.__evoraObs = {};
 const frame = document.getElementById("engine");
-const send = (m, transfer) => frame.contentWindow.postMessage(m, ENGINE, transfer || []);
-addEventListener("message", (e) => {
-  const d = e.data;
-  const fromEngine = e.source === frame.contentWindow && e.origin === ENGINE;
-  const plain = d !== null && typeof d === "object" && Object.getPrototypeOf(d) === Object.prototype;
-  log.push({origin: e.origin, fromEngine, plain, keys: plain ? Object.keys(d) : [], v: plain ? d.v : null,
-            type: plain ? d.type : null, id: plain ? d.id : null, re: plain ? (d.re || null) : null,
-            payload: plain && d.payload ? JSON.parse(JSON.stringify(d.payload,
-              (k, v) => v instanceof ArrayBuffer ? {byteLength: v.byteLength} : v)) : null});
-  if (!fromEngine || !plain || d.v !== 1) return;
-  if (d.type === "evora:ready") {
-    ids.ready = d.id;
-    ids.bogus = ulid();
-    send({v: 2, type: "evora:init", id: ids.bogus, re: d.id, payload: {}});
-    ids.init = ulid();
-    send({v: 1, type: "evora:init", id: ids.init, re: d.id, payload: {
-      lang: "fr", engineLang: "fr", theme: "dark", accent: "#4F46E5", readOnly: false,
-      storageNs: "ab".repeat(32), displayName: "Compte Evora", capabilities: d.payload.capabilities,
-      prefs: {}, limits: {maxDocumentBytes: 1048576, maxExportBytes: 1048576}}});
-  } else if (d.type === "evora:ack" && d.re === ids.init && d.payload && d.payload.ok === true) {
-    const bytes = Uint8Array.from(atob(PDF), (c) => c.charCodeAt(0)).buffer;
-    ids.open = ulid();
-    send({v: 1, type: "evora:open", id: ids.open, payload: {docRef: ulid(), name: "evora-smoke.pdf", bytes}}, [bytes]);
+const observer = document.getElementById("observer");
+const send = (key, m, transfer) => { ids[key] = m.id; frame.contentWindow.postMessage(m, ENGINE, transfer || []); };
+const plainObject = (x) => x !== null && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype;
+const binaries = (p) => {
+  const out = {};
+  if (plainObject(p)) for (const k of Object.keys(p)) {
+    const x = p[k];
+    if (x !== null && typeof x === "object" && !Array.isArray(x) && !plainObject(x))
+      out[k] = {kind: Object.prototype.toString.call(x), byteLength: typeof x.byteLength === "number" ? x.byteLength : null};
   }
+  return out;
+};
+addEventListener("message", (e) => {
+  const t = now();
+  const d = e.data;
+  if (e.source === observer.contentWindow && e.origin === ENGINE) {
+    if (plainObject(d) && typeof d.probe === "string") obs[d.probe] = {t, all: d.all, engine: d.engine};
+    return;
+  }
+  const fromEngine = e.source === frame.contentWindow && e.origin === ENGINE;
+  const plain = plainObject(d);
+  log.push({t, origin: e.origin, fromEngine, plain, keys: plain ? Object.keys(d) : [], v: plain ? d.v : null,
+            type: plain ? d.type : null, id: plain ? d.id : null, re: plain && "re" in d ? d.re : null,
+            payloadPlain: plain && plainObject(d.payload),
+            payload: plain && d.payload ? JSON.parse(JSON.stringify(d.payload,
+              (k, v) => v instanceof ArrayBuffer ? {byteLength: v.byteLength} : v)) : null,
+            binary: plain ? binaries(d.payload) : {}});
+  if (!fromEngine || !plain || d.v !== 1) return;
+  if (d.type === "evora:ready" && !ids.ready) {
+    ids.ready = d.id;
+    window.__evoraCaps = Array.isArray(d.payload && d.payload.capabilities) ? d.payload.capabilities : [];
+  } else if (d.type === "evora:ack") {
+    // L'observateur (même origine, même stockage que le moteur) lit le stockage dès l'accusé reçu.
+    if ([ids.init, ids.purge, ids.purgeAll].includes(d.re)) observer.contentWindow.postMessage({probe: d.re}, ENGINE);
+    if (d.re === ids.init && d.payload && d.payload.ok === true && !ids.open) {
+      const bytes = Uint8Array.from(atob(PDF), (c) => c.charCodeAt(0)).buffer;
+      ids.docRef = ulid();
+      send("open", {v: 1, type: "evora:open", id: ulid(), payload: {docRef: ids.docRef, name: "evora-smoke.pdf", bytes}}, [bytes]);
+    }
+  } else if (d.type === "evora:save" && !ids.save) {
+    ids.save = d.id;
+    send("saved", {v: 1, type: "evora:saved", id: ulid(), re: d.id, payload: {ok: true, version: 1}});
+  }
+});
+window.__evoraGo = () => {
+  if (!ids.ready || ids.init) return false;
+  send("bogus", {v: 2, type: "evora:init", id: ulid(), re: ids.ready, payload: {}});
+  send("init", {v: 1, type: "evora:init", id: ulid(), re: ids.ready, payload: {
+    lang: "fr", engineLang: "fr", theme: "dark", accent: "#4F46E5", readOnly: false,
+    storageNs: "%(ns)s", displayName: "Compte Evora", capabilities: window.__evoraCaps,
+    prefs: {}, limits: {maxDocumentBytes: 1048576, maxExportBytes: 1048576}}});
+  return true;
+};
+window.__evoraSend = (key, type, payload) => { send(key, {v: 1, type, id: ulid(), payload}); return ids[key]; };
+"""
+
+# Observateur servi par l'origine du moteur (même stockage partitionné que le moteur : même origine,
+# même page de premier niveau) : à chaque sonde de la page parente, il lit le localStorage aussitôt.
+OBSERVER_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Evora smoke : observateur</title>
+<script src="__evora-observer.js"></script></head><body></body></html>
+"""
+OBSERVER_JS = """"use strict";
+const PARENT = "%(parent)s";
+const PREFIX = "%(prefix)s";
+const LOOSE = %(loose)s;
+addEventListener("message", (e) => {
+  if (e.origin !== PARENT || e.source !== window.parent) return;
+  const d = e.data;
+  if (d === null || typeof d !== "object" || typeof d.probe !== "string") return;
+  const all = Object.keys(localStorage).sort();
+  window.parent.postMessage({probe: d.probe, all, engine: all.filter((k) => k.startsWith(PREFIX) || LOOSE.includes(k))}, PARENT);
 });
 """
 
+# Page intruse, d'une origine NON admise par evora-host.json (et d'une autre fenêtre que la parente) :
+# elle envoie au moteur des messages EHP bien formés, dont un evora:purge {scope: "all"} ; le moteur
+# ne doit ni répondre ni agir. Le témoin : les mêmes messages venus de la page parente admise ont un accusé.
+INTRUDER_PAGE = """<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Evora smoke : origine non admise</title></head><body>
+<script>
+const IDS = %(ids)s;
+const MESSAGES = [["evora:purge", {scope: "all"}], ["evora:lang", {lang: "ja", engineLang: "ja"}],
+                  ["evora:theme", {theme: "light", accent: "#4F46E5"}]];
+window.__evoraIntrude = () => {
+  const engine = window.parent.frames[0];
+  MESSAGES.forEach(([type, payload], i) => engine.postMessage({v: 1, type, id: IDS[i], payload}, "*"));
+  return JSON.stringify(IDS);
+};
+</script>
+</body></html>
+"""
+
+
+def intruder_page():
+    return (INTRUDER_PAGE % {"ids": json.dumps(INTRUDER_IDS)}).encode()
+
 
 def parent_page(query, host=False):
-    harness = HOST_HARNESS % {"engine": ENGINE_ORIGIN, "pdf": base64.b64encode(minimal_pdf()).decode()} if host else ""
+    harness = HOST_HARNESS % {"engine": ENGINE_ORIGIN, "pdf": base64.b64encode(minimal_pdf()).decode(),
+                              "ns": NS_OWN} if host else ""
+    # Ordre des cadres : le moteur d'abord (window.frames[0] pour la page intruse).
+    extra = (f'<iframe id="observer" src="{ENGINE_ORIGIN}/__evora-observer.html" width="10" height="10" style="border:0"></iframe>\n'
+             f'<iframe id="intruder" src="{INTRUDER_ORIGIN}/" width="10" height="10" style="border:0"></iframe>\n') if host else ""
     return f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Evora smoke</title></head>
 <body style="margin:0;background:#fff">
 <iframe id="engine" src="{ENGINE_ORIGIN}/index.html{query}" width="{IFRAME_W}" height="{IFRAME_H}"
  style="border:0;display:block" sandbox="allow-scripts allow-same-origin"></iframe>
-<script>
+{extra}<script>
 window.__evoraMessages = [];
 addEventListener("message", (e) => {{
   const d = e.data;
@@ -166,15 +278,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Security-Policy", self.csp)
         super().end_headers()
 
+    def send_body(self, body, ctype):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
-        if self.host_config is not None and self.path.split("?")[0] == "/evora-host.json":
+        path = self.path.split("?")[0]
+        if self.host_config is not None and path == "/evora-host.json":
             # Ce qu'écrit le provisionnement d'Evora à côté d'index.html (HOST-PROTOCOL §2.3).
-            body = json.dumps(self.host_config).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.send_body(json.dumps(self.host_config).encode(), "application/json")
+            return
+        if self.host_config is not None and path == "/__evora-observer.html":
+            # Observateur du banc (hors artefact), servi sous la même CSP que le moteur.
+            self.send_body(OBSERVER_HTML.encode(), MIME[".html"])
+            return
+        if self.host_config is not None and path == "/__evora-observer.js":
+            body = OBSERVER_JS % {"parent": PARENT_ORIGIN, "prefix": NS_PREFIX, "loose": json.dumps(list(LOOSE_KEYS))}
+            self.send_body(body.encode(), MIME[".js"])
             return
         if self.page is not None:
             if self.path.split("?")[0] in ("/", "/index.html"):
@@ -350,6 +473,13 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
         parent6 = start_server(PORT_B, "::1", page=parent_page(query, host), served=served)
     except OSError:
         parent6 = None
+    intruders = []
+    if host:
+        intruders.append(start_server(PORT_C, "127.0.0.1", page=intruder_page(), served=served))
+        try:
+            intruders.append(start_server(PORT_C, "::1", page=intruder_page(), served=served))
+        except OSError:
+            pass
     profile = tempfile.mkdtemp(prefix=f"evora-smoke-{name}-")
     chrome = Chrome(chrome_bin, profile, os.path.join(out_dir, f"chrome-{name}.log"))
     errors = []
@@ -404,6 +534,14 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
         chrome.call("Emulation.setDeviceMetricsOverride",
                     {"width": IFRAME_W + 40, "height": IFRAME_H + 40, "deviceScaleFactor": 1, "mobile": False}, page)
         chrome.call("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True}, page)
+        if host:
+            # Le banc donne le focus au canvas du moteur (Ctrl+S, enregistrement des réglages) : la page
+            # se comporte comme une fenêtre au premier plan, même sans interface.
+            try:
+                chrome.call("Emulation.setFocusEmulationEnabled", {"enabled": True}, page)
+            except (RuntimeError, TimeoutError) as exc:
+                result["focus_emulation"] = f"indisponible : {exc}"
+
         def wait_ready(t0, stale=()):
             """Attend un contexte moteur (hors `stale`) dont eframe a dimensionné le canvas."""
             probe = None
@@ -411,30 +549,34 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
                 chrome.pump(0.1)
                 if errors and time.monotonic() - t0 > ERROR_GRACE:
                     break  # erreurs déjà relevées : inutile d'attendre la fin du délai
+                # Plusieurs documents de l'origine moteur (le moteur, et l'observateur du scénario
+                # « pont-ehp ») : seul celui qui porte le canvas compte.
                 engine_ctx = [k for k, o in contexts.items() if o == ENGINE_ORIGIN and k not in stale]
-                if not engine_ctx:
-                    continue
-                sess, ctx = engine_ctx[-1]
-                try:
-                    r = chrome.call("Runtime.evaluate", {"expression": PROBE, "contextId": ctx, "returnByValue": True}, sess, 10)
-                except (RuntimeError, TimeoutError):
-                    continue
-                probe = json.loads(r.get("result", {}).get("value", "{}") or "{}")
-                if probe.get("canvas") and probe.get("cw", 0) > 0 and probe.get("w") != 300 \
-                        and abs(probe["w"] - round(probe["cw"] * probe.get("dpr", 1))) <= 1:
-                    marks = probe.get("marks", {})
-                    result["trunk_started_ms"] = round(marks["trunkStarted"]) if "trunkStarted" in marks else None
-                    return (time.monotonic() - t0, marks.get("canvasSized", probe["t"]), sess, ctx), probe
+                for sess, ctx in reversed(engine_ctx):
+                    try:
+                        r = chrome.call("Runtime.evaluate", {"expression": PROBE, "contextId": ctx, "returnByValue": True}, sess, 10)
+                    except (RuntimeError, TimeoutError):
+                        continue
+                    found = json.loads(r.get("result", {}).get("value", "{}") or "{}")
+                    if not found.get("canvas"):
+                        continue
+                    probe = found
+                    if probe.get("cw", 0) > 0 and probe.get("w") != 300 \
+                            and abs(probe["w"] - round(probe["cw"] * probe.get("dpr", 1))) <= 1:
+                        marks = probe.get("marks", {})
+                        result["trunk_started_ms"] = round(marks["trunkStarted"]) if "trunkStarted" in marks else None
+                        return (time.monotonic() - t0, marks.get("canvasSized", probe["t"]), sess, ctx), probe
             return None, probe
 
         t0 = time.monotonic()
         chrome.call("Page.navigate", {"url": f"{PARENT_ORIGIN}/"}, page)
         ready, probe = wait_ready(t0)
-        if ready is not None and expect.get("legacy_storage"):
-            # E5 : un « compte précédent » a laissé ses réglages sous les clés partagées de l'amont ;
-            # après rechargement, le moteur ne doit ni les appliquer (langue « ja ») ni les garder.
+        if ready is not None and expect.get("upstream_storage"):
+            # E5, hors pont (sans ?host=evora) : comportement amont inchangé. Les réglages laissés sous
+            # les clés de l'amont ne sont pas purgés au démarrage : seuls evora:init et evora:purge,
+            # sous le pont, effacent quelque chose.
             _, _, sess0, ctx0 = ready
-            seed = ("localStorage.setItem('pdfcraft', JSON.stringify({language: 'ja', author: 'Compte précédent'}));"
+            seed = ("localStorage.setItem('pdfcraft', JSON.stringify({language: 'en', reload_changed_files: false}));"
                     "localStorage.setItem('printcraft', '{}'); 'ok'")
             chrome.call("Runtime.evaluate", {"expression": seed, "contextId": ctx0, "returnByValue": True}, sess0)
             stale = set(k for k, o in contexts.items() if o == ENGINE_ORIGIN)
@@ -445,9 +587,9 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
                 keys = chrome.call("Runtime.evaluate", {"expression": "JSON.stringify(Object.keys(localStorage))",
                                                         "contextId": ctx1, "returnByValue": True}, sess1)
                 result["storage_keys"] = json.loads(keys.get("result", {}).get("value", "[]"))
-                leftover = [k for k in ("pdfcraft", "printcraft") if k in result["storage_keys"]]
-                if leftover:
-                    errors.append(f"[test] clés partagées de l'amont encore présentes après démarrage : {leftover}")
+                missing = [k for k in ("pdfcraft", "printcraft") if k not in result["storage_keys"]]
+                if missing:
+                    errors.append(f"[hors-pont] clés de l'amont effacées au démarrage sans pont (amont modifié) : {missing}")
         result["probe"] = probe
         if ready is None:
             errors.append(f"[test] canvas non dimensionné par eframe après {time.monotonic() - t0:.0f} s "
@@ -460,7 +602,7 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
             while time.monotonic() < settle_end:
                 chrome.pump(0.1)
             if host:
-                check_ehp(chrome, page, result, errors)
+                run_ehp(chrome, page, (sess, ctx), contexts, result, errors, expect.get("sabotage", ""))
             gl = chrome.call("Runtime.evaluate", {"expression": GL_PROBE, "contextId": ctx, "returnByValue": True}, sess)
             result["gl"] = gl.get("result", {}).get("value")
             if result["gl"] != "webgl2":
@@ -493,7 +635,7 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
         errors.append(f"[test] incident : {exc!r}")
     finally:
         chrome.close()
-        for srv in (engine, parent, parent6):
+        for srv in (engine, parent, parent6, *intruders):
             if srv is not None:
                 srv.shutdown()
                 srv.server_close()
@@ -504,43 +646,377 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
     return result
 
 
-LOG_EXPR = "JSON.stringify({log: window.__evoraLog || [], ids: window.__evoraIds || {}})"
+LOG_EXPR = "JSON.stringify({log: window.__evoraLog || [], ids: window.__evoraIds || {}, obs: window.__evoraObs || {}})"
+
+# Instrument posé par le banc dans le document moteur, avant evora:init : journal des écritures du
+# stockage (sans horloge ; les messages reçus par le moteur y servent de bornes) et, pour le témoin
+# sabordé seulement, un removeItem sans effet.
+STORE_HOOK = """(() => {
+  if (window.__evoraStoreLog) return "déjà posé";
+  const S = Storage.prototype;
+  const orig = {set: S.setItem, remove: S.removeItem, clear: S.clear};
+  const log = window.__evoraStoreLog = [];
+  const sabotage = "%(sabotage)s";
+  window.__evoraBench = false;
+  const entry = (op, key) => log.push({op, key, bench: window.__evoraBench === true});
+  S.setItem = function (k, v) { entry("set", String(k)); return orig.set.call(this, k, v); };
+  S.removeItem = function (k) { entry("remove", String(k)); if (sabotage === "no-remove") return undefined; return orig.remove.call(this, k); };
+  S.clear = function () { entry("clear", null); if (sabotage === "no-remove") return undefined; return orig.clear.call(this); };
+  addEventListener("message", (e) => {
+    const d = e.data;
+    entry("msg", e.origin + " " + (d !== null && typeof d === "object" ? String(d.type) : "?"));
+  }, true);
+  return sabotage ? "posé, sabordage " + sabotage : "posé";
+})()"""
+
+SEED = """((seeds) => {
+  window.__evoraBench = true;
+  try { for (const [k, v] of seeds) localStorage.setItem(k, v); } finally { window.__evoraBench = false; }
+  return Object.keys(localStorage).sort();
+})(%s)"""
+
+SNAPSHOT = """(async () => {
+  const keys = Object.keys(localStorage).sort();
+  const values = {};
+  for (const k of keys) values[k] = localStorage.getItem(k);
+  const out = {keys, values, log: window.__evoraStoreLog || null};
+  try {
+    const root = await navigator.storage.getDirectory();
+    const names = [];
+    for await (const name of root.keys()) names.push(name);
+    out.opfs = names;
+  } catch (e) { out.opfs = "indisponible : " + e.name; }
+  try { out.idb = (await indexedDB.databases()).map((d) => d.name); } catch (e) { out.idb = "indisponible : " + e.name; }
+  try { out.cache = await caches.keys(); } catch (e) { out.cache = "indisponible : " + e.name; }
+  return JSON.stringify(out);
+})()"""
+
+# Focus réel du canvas (évalué comme un geste de l'utilisateur), puis l'événement que suit eframe.
+FOCUS = """(() => { const c = document.getElementById("pdfcraft"); c.focus();
+  c.dispatchEvent(new FocusEvent("focus")); return document.activeElement === c; })()"""
+# Perte de focus : eframe enregistre alors l'état de l'app (App::save).
+BLUR = """(() => { const c = document.getElementById("pdfcraft"); c.blur();
+  c.dispatchEvent(new FocusEvent("blur")); return document.activeElement !== c; })()"""
+KEY = """(() => { const c = document.getElementById("pdfcraft");
+  c.dispatchEvent(new KeyboardEvent("%(type)s", {key: "s", code: "KeyS", ctrlKey: %(ctrl)s, bubbles: true, cancelable: true}));
+  return document.activeElement === c; })()"""
 
 
-def check_ehp(chrome, page, result, errors):
-    """E4 : poignée de main EHP v1 vue de la page parente (HOST-PROTOCOL.md §3, §4, §5)."""
-    end = time.monotonic() + 30
-    state = {}
-    while time.monotonic() < end:
-        chrome.pump(0.2)
-        r = chrome.call("Runtime.evaluate", {"expression": LOG_EXPR, "returnByValue": True}, page)
-        state = json.loads(r.get("result", {}).get("value", "{}") or "{}")
-        ids = state.get("ids", {})
-        if ids.get("open") and any(m.get("re") == ids["open"] for m in state.get("log", [])):
-            break
-    log, ids = state.get("log", []), state.get("ids", {})
+def engine_keys(keys):
+    """Clés du moteur parmi `keys` : espaces de noms et clés hors espace."""
+    return sorted(k for k in keys if k.startswith(NS_PREFIX) or k in LOOSE_KEYS)
+
+
+def leftovers(keys, doomed):
+    return [k for k in doomed if k in keys]
+
+
+def writes_after(log, message):
+    """Écritures du moteur (hors banc) journalisées après la réception de `message` (« origine type »)."""
+    seen, out = False, []
+    for op in log:
+        if op.get("op") == "msg" and op.get("key") == message:
+            seen = True
+        elif seen and op.get("op") in ("set", "clear") and not op.get("bench"):
+            out.append(op.get("key"))
+    return out
+
+
+def detector_selftest():
+    """Les détecteurs signalent des cas connus et se taisent sur des cas sains : un détecteur muet ne
+    peut pas passer pour un vert."""
+    purge = PARENT_ORIGIN + " evora:purge"
+    late = [{"op": "msg", "key": purge}, {"op": "remove", "key": "k"}, {"op": "set", "key": "k", "bench": False}]
+    benign = [{"op": "set", "key": "k", "bench": False}, {"op": "msg", "key": purge},
+              {"op": "msg", "key": INTRUDER_ORIGIN + " evora:purge"}, {"op": "set", "key": "w", "bench": True}]
+    own = NS_PREFIX + NS_OWN
+    return (writes_after(late, purge) == ["k"] and writes_after(benign, purge) == []
+            and leftovers([own, WITNESS_KEY], [own]) == [own] and leftovers([WITNESS_KEY], [own]) == []
+            and engine_keys([WITNESS_KEY, "pdfcraft", own]) == sorted(["pdfcraft", own]))
+
+
+def run_ehp(chrome, page, engine, contexts, result, errors, sabotage=""):
+    """E4 et E5 : poignée de main EHP v1 et cycle de vie du stockage, vus de la page parente, de
+    l'observateur et du document moteur (HOST-PROTOCOL.md §3, §4, §5, §7.1, §7.7, §9)."""
+    sess, ctx = engine
+    own, other, other2 = NS_PREFIX + NS_OWN, NS_PREFIX + NS_OTHER, NS_PREFIX + NS_OTHER2
+    store = result.setdefault("stockage", {})
+
+    def evaluate(expr, session, context=None, await_promise=False, gesture=False):
+        params = {"expression": expr, "returnByValue": True}
+        if context is not None:
+            params["contextId"] = context
+        if await_promise:
+            params["awaitPromise"] = True
+        if gesture:
+            params["userGesture"] = True
+        r = chrome.call("Runtime.evaluate", params, session, 20)
+        if r.get("exceptionDetails"):
+            d = r["exceptionDetails"]
+            raise RuntimeError(f"évaluation : {d.get('text', '')} {describe_remote(d.get('exception', {}))}")
+        return r.get("result", {}).get("value")
+
+    def in_engine(expr, await_promise=False, gesture=False):
+        return evaluate(expr, sess, ctx, await_promise, gesture)
+
+    def state():
+        return json.loads(evaluate(LOG_EXPR, page) or "{}")
+
+    def wait(cond, timeout=30.0):
+        end = time.monotonic() + timeout
+        st = state()
+        while not cond(st) and time.monotonic() < end:
+            chrome.pump(0.2)
+            st = state()
+        return st
+
+    def settle(seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            chrome.pump(0.1)
+
+    def acks(st, key):
+        i = st.get("ids", {}).get(key)
+        return [m for m in st.get("log", []) if i and m.get("type") == "evora:ack" and m.get("re") == i]
+
+    def observed(st, key):
+        i = st.get("ids", {}).get(key)
+        return st.get("obs", {}).get(i) if i else None
+
+    def snapshot(label):
+        snap = json.loads(in_engine(SNAPSHOT, await_promise=True) or "{}")
+        store[label] = {"cles": snap.get("keys"), "opfs": snap.get("opfs"), "idb": snap.get("idb"), "cache": snap.get("cache")}
+        return snap
+
+    def check_purge(label, key, st):
+        got = acks(st, key)
+        if len(got) != 1 or (got[0].get("payload") or {}).get("ok") is not True:
+            errors.append(f"[purge] accusé d'evora:purge ({label}) absent ou négatif : {[m.get('payload') for m in got]}")
+        seen = observed(st, key)
+        store[f"observateur_purge_{label}"] = seen
+        if seen is None:
+            errors.append(f"[banc] observateur muet après l'accusé d'evora:purge ({label})")
+        elif seen.get("engine"):
+            errors.append(f"[purge] à l'arrivée de l'accusé d'evora:purge ({label}), stockage du moteur non vide : {seen['engine']}")
+        snap = snapshot(f"apres_purge_{label}")
+        if engine_keys(snap.get("keys") or []):
+            errors.append(f"[purge] après l'accusé d'evora:purge ({label}), stockage du moteur non vide : "
+                          f"{engine_keys(snap.get('keys') or [])}")
+        if WITNESS_KEY not in (snap.get("keys") or []):
+            errors.append(f"[purge] evora:purge ({label}) a effacé une clé étrangère au moteur ({WITNESS_KEY})")
+        for where in ("opfs", "idb", "cache"):
+            if isinstance(snap.get(where), list) and snap[where]:
+                errors.append(f"[purge] {where} non vide après evora:purge ({label}) : {snap[where]}")
+        return snap
+
+    if not detector_selftest():
+        errors.append("[banc] détecteur muet : un cas connu n'est pas signalé (autotest des détecteurs)")
+
+    # 1. evora:ready ; la page parente n'envoie rien tant que le banc n'a pas semé le stockage.
+    st = wait(lambda s: s.get("ids", {}).get("ready"))
+    if st.get("ids", {}).get("ready"):
+        # 2. Instrument, puis les restes d'une séance précédente : un autre compte, l'amont, la mémoire
+        # d'eframe, des réglages du compte courant, et une clé étrangère au moteur.
+        store["instrument"] = in_engine(STORE_HOOK % {"sabotage": sabotage})
+        seeds = [[other, json.dumps({"language": "ja", "author": "Autre compte"})],
+                 [own, json.dumps({"reload_changed_files": False, "author": "Ancien nom", "language": "ja"})],
+                 ["pdfcraft", json.dumps({"language": "ja", "author": "Compte précédent"})], ["printcraft", "{}"],
+                 ["egui_memory_ron", "()"], [WITNESS_KEY, "1"]]
+        store["seme"] = in_engine(SEED % json.dumps(seeds))
+        # 3. evora:init de version 2 (à ignorer), puis evora:init valide (storageNs du compte courant).
+        if evaluate("window.__evoraGo()", page) is not True:
+            errors.append("[banc] la page parente n'a pas pu envoyer evora:init")
+        st = wait(lambda s: acks(s, "init") and observed(s, "init") is not None)
+        if acks(st, "init"):
+            # E5, §7.7 b : à l'accusé d'init, l'autre compte et les restes hors espace sont effacés ;
+            # l'espace du compte courant et la clé étrangère restent.
+            doomed = [other, *LOOSE_KEYS]
+            seen = observed(st, "init")
+            store["observateur_init"] = seen
+            if seen is None:
+                errors.append("[banc] observateur muet après l'accusé d'evora:init")
+            elif leftovers(seen.get("all") or [], doomed):
+                errors.append(f"[purge-demarrage] à l'arrivée de l'accusé d'evora:init, restes d'un autre compte ou "
+                              f"hors espace : {leftovers(seen.get('all') or [], doomed)}")
+            snap = snapshot("apres_init")
+            keys = snap.get("keys") or []
+            if leftovers(keys, doomed):
+                errors.append(f"[purge-demarrage] après l'accusé d'evora:init, restes encore présents : {leftovers(keys, doomed)}")
+            if own not in keys:
+                errors.append("[purge-demarrage] l'espace du compte courant a été effacé au démarrage")
+            if WITNESS_KEY not in keys:
+                errors.append(f"[purge-demarrage] clé étrangère au moteur effacée au démarrage ({WITNESS_KEY})")
+        # 4. evora:open (envoyé par la page parente à l'accusé d'init) ; langue et thème à chaud.
+        st = wait(lambda s: acks(s, "open"))
+        evaluate("window.__evoraSend('lang', 'evora:lang', {lang: 'de', engineLang: 'de'})", page)
+        evaluate("window.__evoraSend('themeLight', 'evora:theme', {theme: 'light', accent: '#4F46E5'})", page)
+        st = wait(lambda s: acks(s, "lang") and acks(s, "themeLight"))
+        settle(1.0)
+        # 5. doc.save : Ctrl+S dans le moteur ⇒ evora:save (la page parente répond evora:saved).
+        store["focus"] = in_engine(FOCUS, gesture=True)
+        if store["focus"] is not True:
+            errors.append("[banc] le canvas du moteur n'a pas pris le focus")
+        settle(0.3)
+        in_engine(KEY % {"type": "keydown", "ctrl": "true"}, gesture=True)
+        settle(0.5)
+        in_engine(KEY % {"type": "keyup", "ctrl": "false"}, gesture=True)
+        st = wait(lambda s: s.get("ids", {}).get("save"), 20)
+        check_save(st, errors)
+        # 6. storage.ns, author, live.lang, live.theme : à la perte de focus, eframe enregistre les
+        # réglages, sous l'espace du compte seulement.
+        store["blur"] = in_engine(BLUR, gesture=True)
+        settle(0.5)
+        snap = snapshot("apres_enregistrement")
+        try:
+            saved = json.loads((snap.get("values") or {}).get(own) or "null")
+        except ValueError:
+            saved = None
+        expected = {"author": "Compte Evora", "language": "de", "theme": "Light", "reload_changed_files": False}
+        got = {k: saved.get(k) for k in expected} if isinstance(saved, dict) else None
+        store["reglages_du_compte"] = got
+        if got != expected:
+            errors.append(f"[stockage.ns] réglages enregistrés sous l'espace du compte : {got} (attendu : {expected})")
+        outside = [k for k in engine_keys(snap.get("keys") or []) if k != own]
+        if outside:
+            errors.append(f"[stockage.ns] clés du moteur hors de l'espace du compte après enregistrement : {outside}")
+        stray = sorted({op.get("key") for op in snap.get("log") or []
+                        if op.get("op") in ("set", "clear") and not op.get("bench") and op.get("key") != own})
+        if stray:
+            errors.append(f"[stockage.ns] écritures du moteur hors de l'espace du compte : {stray}")
+        # 7. Origine non admise (autre origine, autre fenêtre) : purge, langue, thème sans réponse ni effet.
+        intruder = [k for k, o in contexts.items() if o == INTRUDER_ORIGIN]
+        if not intruder:
+            errors.append("[banc] page intruse introuvable")
+        else:
+            isess, ictx = intruder[-1]
+            sent = json.loads(evaluate("window.__evoraIntrude()", isess, ictx) or "[]")
+            settle(2.0)
+            st = state()
+            answered = [m.get("type") for m in st.get("log", []) if m.get("re") in sent]
+            store["intrus"] = {"envoyes": sent, "reponses": answered}
+            if sent != INTRUDER_IDS:
+                errors.append(f"[banc] la page intruse n'a pas envoyé ses messages : {sent}")
+            if answered:
+                errors.append(f"[intrus] le moteur a répondu à des messages d'une origine non admise : {answered}")
+            if own not in (snapshot("apres_intrus").get("keys") or []):
+                errors.append("[intrus] un evora:purge d'une origine non admise a effacé l'espace du compte")
+        # 8. Thème sombre (attendu au rendu), puis evora:purge {scope: "current"} : accusé après effacement.
+        evaluate("window.__evoraSend('themeDark', 'evora:theme', {theme: 'dark', accent: '#4F46E5'})", page)
+        st = wait(lambda s: acks(s, "themeDark"))
+        evaluate("window.__evoraSend('purge', 'evora:purge', {scope: 'current'})", page)
+        st = wait(lambda s: acks(s, "purge") and observed(s, "purge") is not None, 15)
+        after = check_purge("current", "purge", st)
+        # 9. Écritures arrêtées : une nouvelle perte de focus (eframe enregistrerait) ne recrée rien.
+        in_engine(FOCUS, gesture=True)
+        settle(0.3)
+        in_engine(BLUR, gesture=True)
+        settle(0.5)
+        snap = snapshot("apres_purge_et_focus")
+        back = sorted(set(engine_keys(snap.get("keys") or [])) - set(engine_keys(after.get("keys") or [])))
+        if back:
+            errors.append(f"[ecritures] clés du moteur recréées après evora:purge : {back}")
+        late = writes_after(snap.get("log") or [], PARENT_ORIGIN + " evora:purge")
+        if late:
+            errors.append(f"[ecritures] écritures du moteur après la réception d'evora:purge : {late}")
+        # 10. evora:purge {scope: "all"} : un autre espace et une clé hors espace, semés par le banc.
+        in_engine(SEED % json.dumps([[other2, "{}"], ["pdfcraft", "{}"]]))
+        evaluate("window.__evoraSend('purgeAll', 'evora:purge', {scope: 'all'})", page)
+        st = wait(lambda s: acks(s, "purgeAll") and observed(s, "purgeAll") is not None, 15)
+        check_purge("all", "purgeAll", st)
+        store["journal"] = (snapshot("fin").get("log") or [])[-60:]
+    check_envelopes(state(), result, errors)
+
+
+def check_save(st, errors):
+    """doc.save : un evora:save conforme (§4.4), pour le document ouvert par la page parente."""
+    ids = st.get("ids", {})
+    saves = [m for m in st.get("log", []) if m.get("type") == "evora:save"]
+    if not saves:
+        errors.append("[save] aucun evora:save après Ctrl+S dans le moteur")
+        return
+    m = saves[0]
+    p = m.get("payload") or {}
+    b = (m.get("binary") or {}).get("bytes") or {}
+    problems = []
+    if set(p) != {"docRef", "name", "saveAs", "bytes"}:
+        problems.append(f"champs {sorted(p)}")
+    if p.get("docRef") != ids.get("docRef"):
+        problems.append("docRef différent de celui du document ouvert")
+    if p.get("name") != "evora-smoke.pdf":
+        problems.append(f"nom {p.get('name')!r}")
+    if p.get("saveAs") is not False:
+        problems.append(f"saveAs {p.get('saveAs')!r}")
+    if b.get("kind") != "[object ArrayBuffer]" or not (b.get("byteLength") or 0) >= 1:
+        problems.append(f"octets {b}")
+    if m.get("re") is not None:
+        problems.append("re posé sans evora:request-save")
+    if problems:
+        errors.append(f"[save] evora:save non conforme : {', '.join(problems)}")
+
+
+def check_envelopes(st, result, errors):
+    """Enveloppe et charge utile de chaque message reçu du moteur (§3, §4.4, §4.5) ; un seul
+    evora:ready ; rien en réponse au message de version 2 ; accusés positifs attendus ; doc.dirty."""
+    log, ids = st.get("log", []), st.get("ids", {})
     result["ehp"] = {"messages": [{k: m.get(k) for k in ("type", "re", "payload")} for m in log], "ids": ids}
     for m in log:
+        where = f"{m.get('type')} {m.get('id')}"
+        keys = set(m.get("keys") or [])
         if not (m.get("fromEngine") and m.get("plain") and m.get("v") == 1):
             errors.append(f"[ehp] message hors norme ou d'une autre source : {m}")
-        elif not set(m.get("keys", [])) <= {"v", "type", "id", "re", "payload"}:
-            errors.append(f"[ehp] enveloppe avec un champ inconnu : {m.get('keys')}")
+            continue
+        if not {"v", "type", "id", "payload"} <= keys <= {"v", "type", "id", "re", "payload"}:
+            errors.append(f"[ehp] enveloppe non conforme ({where}) : champs {sorted(keys)}")
+            continue
+        if not ULID_RE.match(str(m.get("id"))):
+            errors.append(f"[ehp] id qui n'est pas un ULID ({where})")
+        if "re" in keys and not ULID_RE.match(str(m.get("re"))):
+            errors.append(f"[ehp] re qui n'est pas un ULID ({where})")
+        if not m.get("payloadPlain"):
+            errors.append(f"[ehp] charge utile qui n'est pas un objet simple ({where})")
+            continue
+        p = m.get("payload") or {}
+        rule = PAYLOAD_KEYS.get(m.get("type"))
+        if rule is None:
+            errors.append(f"[ehp] type inattendu venu du moteur ({where})")
+        elif not rule[0] <= set(p) <= rule[1]:
+            errors.append(f"[ehp] charge utile non conforme ({where}) : champs {sorted(p)}")
+        if m.get("type") == "evora:ack" and ("re" not in keys or not isinstance(p.get("ok"), bool)
+                                             or (p.get("ok") is False and "code" not in p)):
+            errors.append(f"[ehp] accusé non conforme ({where}) : {p}")
+        if m.get("type") in ("evora:ready", "evora:dirty") and "re" in keys:
+            errors.append(f"[ehp] re inattendu ({where})")
+        if m.get("type") == "evora:dirty" and not isinstance(p.get("dirty"), bool):
+            errors.append(f"[ehp] evora:dirty non conforme ({where}) : {p}")
     ready = [m for m in log if m.get("type") == "evora:ready"]
     if len(ready) != 1:
         errors.append(f"[ehp] evora:ready reçu {len(ready)} fois (attendu : 1)")
     else:
         p = ready[0].get("payload") or {}
-        caps = set(p.get("capabilities") or [])
-        if p.get("app") != "colophon-atelier" or p.get("ehp") != "1.0" or not {"doc.open", "doc.save"} <= caps:
-            errors.append(f"[ehp] evora:ready inattendu : {p}")
-    def ack(re):
-        return [m for m in log if m.get("type") == "evora:ack" and m.get("re") == re]
-    if [m for m in log if ids.get("bogus") and m.get("re") == ids["bogus"]]:
+        caps = p.get("capabilities")
+        result["capabilities"] = caps
+        if (p.get("app") != "colophon-atelier" or p.get("ehp") != "1.0" or not SEMVER_RE.match(str(p.get("version")))
+                or not isinstance(caps, list) or len(set(caps)) != len(caps) or not set(caps) <= CAPABILITY_NAMES
+                or not {"doc.open", "doc.save", "storage.ns", "storage.purge"} <= set(caps)):
+            errors.append(f"[ehp] evora:ready non conforme : {p}")
+    if ids.get("bogus") and [m for m in log if m.get("re") == ids["bogus"]]:
         errors.append("[ehp] le moteur a répondu à un evora:init de version 2 (doit l'ignorer)")
-    for step in ("init", "open"):
-        got = ack(ids.get(step)) if ids.get(step) else []
+    for step in ("init", "open", "lang", "themeLight", "themeDark"):
+        got = [m for m in log if ids.get(step) and m.get("type") == "evora:ack" and m.get("re") == ids[step]]
         if len(got) != 1 or (got[0].get("payload") or {}).get("ok") is not True:
-            errors.append(f"[ehp] accusé de evora:{step} absent ou négatif : {got}")
+            errors.append(f"[ehp] accusé de {step} absent ou négatif : {[g.get('payload') for g in got]}")
+    if not [m for m in log if m.get("type") == "evora:dirty"]:
+        errors.append("[ehp] aucun evora:dirty (capacité doc.dirty non exercée)")
+
+
+# Témoin sabordé : les détecteurs qui doivent rougir, et eux seuls, quand removeItem est sans effet
+# dans le moteur (le moteur croit effacer, rien ne l'est).
+WITNESS_SABOTAGE = "no-remove"
+WITNESS_EXPECTED = {"purge-demarrage", "purge", "stockage.ns"}
+
+
+def error_tags(errors):
+    return {m.group(1) for m in (re.match(r"^\[([^\]]+)\]", e) for e in errors) if m}
 
 
 def main(argv):
@@ -568,24 +1044,39 @@ def main(argv):
         # E3 : langue et thème imposés par l'URL du moteur, vérifiés au rendu.
         results.append(run_scenario("fr-sombre", site, engine_csp(hashes), out_dir, chrome_bin, fr,
                                     {"probe": "Bienvenue", "dark": True}))
-        # E4 : pont EHP natif, origine parente admise par evora-host.json ; evora:init impose le
-        # thème sombre, evora:open ouvre « evora-smoke.pdf » (son onglet doit être dessiné).
-        results.append(run_scenario("pont-ehp", site, engine_csp(hashes), out_dir, chrome_bin,
-                                    f"?host=evora&evora-audit=1&evora-probe=evora-smoke",
+        # E4 et E5 : pont EHP natif, origine parente admise par evora-host.json (run_ehp) ; à la fin,
+        # thème sombre et onglet « evora-smoke.pdf » dessinés.
+        ehp_query = "?host=evora&evora-audit=1&evora-probe=evora-smoke"
+        results.append(run_scenario("pont-ehp", site, engine_csp(hashes), out_dir, chrome_bin, ehp_query,
                                     {"probe": "evora-smoke", "dark": True, "ehp": True}))
-        # E5 : les réglages laissés par un autre compte sous les clés partagées ne s'appliquent pas
-        # (la langue « ja » semée ne doit pas apparaître : « Welcome » reste dessiné) et sont purgés.
-        results.append(run_scenario("stockage", site, engine_csp(hashes), out_dir, chrome_bin, en,
-                                    {"probe": "Welcome", "dark": False, "legacy_storage": True}))
+        # E5 hors pont : comportement amont inchangé (aucune purge au démarrage sans ?host=evora).
+        results.append(run_scenario("hors-pont", site, engine_csp(hashes), out_dir, chrome_bin, en,
+                                    {"probe": "Welcome", "dark": False, "upstream_storage": True}))
+        # Témoin sabordé : le même banc que « pont-ehp », sur un moteur dont removeItem est sans effet.
+        # Il DOIT être rouge, par les seuls détecteurs du stockage (WITNESS_EXPECTED).
+        witness = run_scenario("pont-ehp-temoin", site, engine_csp(hashes), out_dir, chrome_bin, ehp_query,
+                               {"probe": "evora-smoke", "dark": True, "ehp": True, "sabotage": WITNESS_SABOTAGE})
+        tags = error_tags(witness["errors"])
+        witness["expected_red"] = sorted(WITNESS_EXPECTED)
+        witness["tags"] = sorted(tags)
+        witness["witness_ok"] = (not witness["ok"]) and tags == WITNESS_EXPECTED
+        results.append(witness)
     with open(os.path.join(out_dir, "smoke.json"), "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2, ensure_ascii=False)
+
+    def verdict(r):
+        if "witness_ok" in r:
+            return "ROUGE attendu : témoin VALIDE" if r["witness_ok"] else "témoin INVALIDE"
+        return "VERT" if r["ok"] else "ROUGE"
+
     with open(report_path, "a", encoding="utf-8") as report:
         def log(line=""):
             print(line)
             report.write(line + "\n")
         log("### Test de fumée Chrome sans interface, origine croisée (bloquant)")
         log()
-        log(f"Moteur servi par {ENGINE_ORIGIN}, encadré par une page de {PARENT_ORIGIN} ; profil vierge par scénario. "
+        log(f"Moteur servi par {ENGINE_ORIGIN}, encadré par une page de {PARENT_ORIGIN} ; origine non admise : "
+            f"{INTRUDER_ORIGIN} ; profil vierge par scénario. "
             "URL de l'iframe : " + " ; ".join(f"{r['scenario']} index.html{r['query']}" for r in results))
         log(f"Navigateur : {results[0].get('chrome', '?')}")
         log()
@@ -593,7 +1084,7 @@ def main(argv):
             "Depuis la navigation parente (sondage) | WebGL2 | Erreurs |")
         log("|---|---|---|---|---|---|---|")
         for r in results:
-            log(f"| {r['scenario']} | {'VERT' if r['ok'] else 'ROUGE'} | {r.get('cold_start_ms_iframe', 'n/d')} ms | "
+            log(f"| {r['scenario']} | {verdict(r)} | {r.get('cold_start_ms_iframe', 'n/d')} ms | "
                 f"{r.get('trunk_started_ms', 'n/d')} ms | {r.get('cold_start_ms_parent', 'n/d')} ms | {r.get('gl', 'n/d')} | "
                 f"{len(r['errors'])} |")
         log()
@@ -607,10 +1098,22 @@ def main(argv):
                     + " ; ".join(f"{m['type']}" + (f" (re {m['re'][-4:]})" if m.get('re') else "")
                                  + (f" {json.dumps(m['payload'], ensure_ascii=False)[:160]}" if m.get('payload') else "")
                                  for m in r["ehp"]["messages"]))
+            if "capabilities" in r:
+                log(f"- {r['scenario']} : capacités annoncées dans evora:ready : {r['capabilities']}")
+            if "stockage" in r:
+                log(f"- {r['scenario']} : stockage du moteur (E5) : "
+                    + json.dumps({k: v for k, v in r["stockage"].items() if k != "journal"}, ensure_ascii=False)[:2400])
+                if r["stockage"].get("journal"):
+                    log(f"- {r['scenario']} : journal des écritures du stockage (fin) : "
+                        + json.dumps(r["stockage"]["journal"], ensure_ascii=False)[:1600])
             if "storage_keys" in r:
                 log(f"- {r['scenario']} : clés localStorage de l'origine moteur après rechargement : {r['storage_keys']}")
             if "audit" in r:
                 log(f"- {r['scenario']} : audit au rendu E9/E10 (window.__evoraAudit) : {r['audit']}")
+            if "witness_ok" in r:
+                log(f"- {r['scenario']} : témoin sabordé ({WITNESS_SABOTAGE} : removeItem sans effet dans le moteur) ; "
+                    f"détecteurs déclenchés {r['tags']} ; attendus {r['expected_red']} ; "
+                    f"{'VALIDE' if r['witness_ok'] else 'INVALIDE : le banc ne rougit pas comme il le doit'}")
             for e in r["errors"]:
                 log(f"  - {e}")
         log()
@@ -618,11 +1121,17 @@ def main(argv):
             log(f"CSP appliquée au scénario « csp » : `{engine_csp(hashes)}`")
             log()
     for r in results:
-        print(f"::notice::fumée {r['scenario']} : {'VERT' if r['ok'] else 'ROUGE'}, démarrage à froid "
+        print(f"::notice::fumée {r['scenario']} : {verdict(r)}, démarrage à froid "
               f"{r.get('cold_start_ms_iframe', 'n/d')} ms (iframe), {r.get('cold_start_ms_parent', 'n/d')} ms (parent)")
+        if "witness_ok" in r:
+            if not r["witness_ok"]:
+                print(f"::error::fumée {r['scenario']} : témoin INVALIDE, détecteurs {r['tags']} au lieu de {r['expected_red']}")
+            continue
         for e in r["errors"]:
             print(f"::error::fumée {r['scenario']} : {e[:900]}")
-    return 0 if all(r["ok"] for r in results) else 1
+    green = all(r["ok"] for r in results if "witness_ok" not in r)
+    witnesses = all(r["witness_ok"] for r in results if "witness_ok" in r)
+    return 0 if green and witnesses else 1
 
 
 if __name__ == "__main__":
