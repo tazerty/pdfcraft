@@ -23,6 +23,10 @@ fn main() {
                 options,
                 Box::new(|cc| {
                     let mut app = PdfCraftApp::new();
+                    // Evora (E10): `?evora-audit=1` (CI smoke test) audits every text drawn for emoji.
+                    if query_param("evora-audit").as_deref() == Some("1") {
+                        cc.egui_ctx.add_plugin(e10::Audit::default());
+                    }
                     // "printcraft": settings saved under the app's former name, PrintCraft.
                     if let Some(json) = cc.storage.and_then(|s| s.get_string("pdfcraft").or_else(|| s.get_string("printcraft"))) {
                         app.restore(&json);
@@ -253,6 +257,108 @@ mod host {
 
     fn string(data: &JsValue, key: &str) -> Option<String> {
         js_sys::Reflect::get(data, &JsValue::from_str(key)).ok()?.as_string()
+    }
+}
+
+/// Evora (E10): render-time audit of the "no emoji in the interface" rule, for the CI smoke test.
+/// With `?evora-audit=1`, every text egui draws is checked just before it reaches the screen, and
+/// the running totals are published as `window.__evoraE10 = { frames, texts, hits, sample }`.
+#[cfg(target_arch = "wasm32")]
+mod e10 {
+    use eframe::wasm_bindgen::JsValue;
+
+    /// Same set as `.github/evora/gates.py` (`is_emoji_like`): emoji and pictograph blocks,
+    /// dingbats (✓ ✔ ✕ ✖ ⚠ ★…), the emoji presentation selector and isolated pictographs.
+    pub fn is_emoji_like(c: char) -> bool {
+        let cp = c as u32;
+        matches!(cp, 0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x23E9..=0x23F3 | 0x23F8..=0x23FA | 0x25FB..=0x25FE)
+            || matches!(
+                cp,
+                0xFE0F
+                    | 0x20E3
+                    | 0x203C
+                    | 0x2049
+                    | 0x2139
+                    | 0x24C2
+                    | 0x231A
+                    | 0x231B
+                    | 0x2328
+                    | 0x23CF
+                    | 0x25B6
+                    | 0x25C0
+                    | 0x2934
+                    | 0x2935
+                    | 0x3030
+                    | 0x303D
+                    | 0x3297
+                    | 0x3299
+            )
+    }
+
+    #[derive(Default)]
+    pub struct Audit {
+        frames: u64,
+        texts: u64,
+        hits: u64,
+        sample: String,
+    }
+
+    /// The detector catches a known dingbat (U+2713) and lets through a letter and the menu
+    /// separator U+25B8: the CI requires it, so a detector that never fires can't pass for green.
+    fn selftest() -> bool {
+        is_emoji_like('\u{2713}') && is_emoji_like('\u{1F600}') && !is_emoji_like('A') && !is_emoji_like('\u{25B8}')
+    }
+
+    impl Audit {
+        fn scan(&mut self, shape: &egui::Shape) {
+            match shape {
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        self.scan(s);
+                    }
+                }
+                egui::Shape::Text(text) => {
+                    self.texts += 1;
+                    let found = text.galley.text().chars().filter(|c| is_emoji_like(*c)).count() as u64;
+                    if found > 0 {
+                        self.hits += found;
+                        if self.sample.is_empty() {
+                            self.sample = text.galley.text().chars().take(120).collect();
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn publish(&self) {
+            let Some(window) = web_sys::window() else { return };
+            let report = js_sys::Object::new();
+            for (key, value) in [
+                ("frames", JsValue::from_f64(self.frames as f64)),
+                ("texts", JsValue::from_f64(self.texts as f64)),
+                ("hits", JsValue::from_f64(self.hits as f64)),
+                ("sample", JsValue::from_str(&self.sample)),
+                ("selftest", JsValue::from_bool(selftest())),
+            ] {
+                let _ = js_sys::Reflect::set(&report, &JsValue::from_str(key), &value);
+            }
+            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__evoraE10"), &report);
+        }
+    }
+
+    impl egui::Plugin for Audit {
+        fn debug_name(&self) -> &'static str {
+            "evora-e10-audit"
+        }
+
+        fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {
+            self.frames += 1;
+            for clipped in &output.shapes {
+                self.scan(&clipped.shape);
+            }
+            self.publish();
+        }
     }
 }
 

@@ -672,7 +672,7 @@ fn finish(cv: &mut ContentView, d: TextDraft, added: &[Added]) -> Option<Edit> {
 pub(crate) fn hint(ui: &mut egui::Ui, t: &Tokens) {
     ui.label(
         egui::RichText::new(
-            tl!("Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it."),
+            tl!("Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it."),
         )
             .small()
             .color(t.text_faint),

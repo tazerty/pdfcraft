@@ -2057,7 +2057,7 @@
 	Centre	Κεντράρισμα
 	Thai and Arabic use regular fallback fonts when available.	Τα ταϊλανδικά και τα αραβικά χρησιμοποιούν κανονικές εναλλακτικές γραμματοσειρές, όταν είναι διαθέσιμες.
 	Crop (% trimmed from each side)	Περικοπή (% αφαίρεσης από κάθε πλευρά)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Κάντε κλικ στη σελίδα για να προσθέσετε κείμενο· κάθε κλικ δημιουργεί νέο πλαίσιο και το ✓ ολοκληρώνει την εισαγωγή. Σύρετε τα στοιχεία για μετακίνηση, μια γωνία για αλλαγή μεγέθους ή κάντε διπλό κλικ στο κείμενο για επεξεργασία.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	Κάντε κλικ στη σελίδα για να προσθέσετε κείμενο· κάθε κλικ δημιουργεί νέο πλαίσιο. Σύρετε τα στοιχεία για μετακίνηση, μια γωνία για αλλαγή μεγέθους ή κάντε διπλό κλικ στο κείμενο για επεξεργασία.
 	Choose an image	Επιλογή εικόνας
 	Export to Image	Εξαγωγή σε εικόνα
 	Export to Text	Εξαγωγή σε κείμενο

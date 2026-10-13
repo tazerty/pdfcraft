@@ -1,27 +1,4 @@
-# Ligne de base de la porte E10 (émojis des catalogues affichés), posée avec les portes CI (EVORA-COL-03).
-# Elle gèle l'existant avant le patch E10 ; toute occurrence nouvelle ou supplémentaire fait échouer la porte.
-# Le patch E10 vide ce fichier : la porte exige alors 0 occurrence.
+# Ligne de base de la porte E10 (émojis des catalogues affichés).
+# Posée à 44 occurrences avec les portes CI (EVORA-COL-03), vidée par le patch E10 (EVORA-COL-04) :
+# la porte exige désormais 0 occurrence. Ne rien ajouter ici sans décision écrite.
 # Format : fichier<TAB>point de code<TAB>occurrences permises
-crates/ui-egui/src/content_ui.rs	U+2713	1
-crates/ui-egui/src/forms_ui.rs	U+2714	1
-crates/ui-egui/src/i18n/ar.tsv	U+2713	2
-crates/ui-egui/src/i18n/bg.tsv	U+2713	2
-crates/ui-egui/src/i18n/cs.tsv	U+2713	2
-crates/ui-egui/src/i18n/de.tsv	U+2713	2
-crates/ui-egui/src/i18n/el.tsv	U+2713	2
-crates/ui-egui/src/i18n/es.tsv	U+2713	2
-crates/ui-egui/src/i18n/fr.tsv	U+2713	2
-crates/ui-egui/src/i18n/hu.tsv	U+2713	2
-crates/ui-egui/src/i18n/it.tsv	U+2713	2
-crates/ui-egui/src/i18n/ja.tsv	U+2713	2
-crates/ui-egui/src/i18n/kk.tsv	U+2713	2
-crates/ui-egui/src/i18n/lt.tsv	U+2713	2
-crates/ui-egui/src/i18n/pl.tsv	U+2713	2
-crates/ui-egui/src/i18n/pt-br.tsv	U+2713	2
-crates/ui-egui/src/i18n/ru.tsv	U+2713	2
-crates/ui-egui/src/i18n/sl.tsv	U+2713	2
-crates/ui-egui/src/i18n/te.tsv	U+2713	2
-crates/ui-egui/src/i18n/tr.tsv	U+2713	2
-crates/ui-egui/src/i18n/uk.tsv	U+2713	2
-crates/ui-egui/src/i18n/zh-hans.tsv	U+2713	2
-crates/ui-egui/src/i18n/zh-hant.tsv	U+2713	2

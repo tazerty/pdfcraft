@@ -733,7 +733,7 @@
 	Flip vertical	Retourner verticalement
 	Replace image	Remplacer l'image
 	Crop (% trimmed from each side)	Rogner (% retiré de chaque côté)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Cliquez sur la page pour ajouter du texte ; chaque clic commence une nouvelle zone, et ✓ termine. Faites glisser les éléments pour les déplacer, faites glisser un coin pour les redimensionner, double-cliquez sur le texte pour le modifier.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	Cliquez sur la page pour ajouter du texte ; chaque clic commence une nouvelle zone. Faites glisser les éléments pour les déplacer, faites glisser un coin pour les redimensionner, double-cliquez sur le texte pour le modifier.
 	Choose an image	Choisir une image
 	Export to Image	Exporter vers une image
 	Export to Text	Exporter vers le texte

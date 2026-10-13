@@ -715,7 +715,7 @@
 	Flip vertical	Dikey çevir
 	Replace image	Resmi değiştir
 	Crop (% trimmed from each side)	Kırp (her kenardan kırpılan %)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Metin eklemek için sayfaya tıklayın; her tıklama yeni bir kutu başlatır ve ✓ tamamlar. Taşımak için öğeleri sürükleyin, yeniden boyutlandırmak için bir köşeden sürükleyin, düzenlemek için metne çift tıklayın.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	Metin eklemek için sayfaya tıklayın; her tıklama yeni bir kutu başlatır. Taşımak için öğeleri sürükleyin, yeniden boyutlandırmak için bir köşeden sürükleyin, düzenlemek için metne çift tıklayın.
 	Choose an image	Bir resim seçin
 	Export to Image	Resim Olarak Dışa Aktar
 	Export to Text	Metin Olarak Dışa Aktar

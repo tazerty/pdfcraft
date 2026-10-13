@@ -359,6 +359,14 @@ pub(crate) fn on_interface_baseline(mut data: FontData) -> FontData {
 
 fn font_definitions_for_platform(prefer_hans: bool, platform: FontPolicyPlatform) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
+    // Evora (E10, "no emoji in the interface"): egui's default emoji faces leave the font stacks,
+    // so a stray emoji can never be drawn as a pictogram.
+    for name in ["NotoEmoji-Regular", "emoji-icon-font"] {
+        fonts.font_data.remove(name);
+        for stack in fonts.families.values_mut() {
+            stack.retain(|f| f.as_str() != name);
+        }
+    }
     let add = |fonts: &mut FontDefinitions, name: &str, bytes: &'static [u8]| {
         let data = FontData::from_static(bytes);
         let data = if ["Inter", "Inter-Medium", "Inter-SemiBold", "JetBrainsMono"].contains(&name) {

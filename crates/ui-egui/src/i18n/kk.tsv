@@ -716,7 +716,7 @@
 	Flip vertical	Тікке аудару
 	Replace image	Суретті ауыстыру
 	Crop (% trimmed from each side)	Қиып алу (әр жақтан %)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Мәтін қосу үшін бетті шертіңіз; әр шерту жаңа жәшік бастайды, ✓ аяқтайды. Элементтерді жылжыту үшін сүйреңіз, өлшемін өзгерту үшін бұрышынан тартыңыз, мәтінді түзету үшін қос шертіңіз.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	Мәтін қосу үшін бетті шертіңіз; әр шерту жаңа жәшік бастайды. Элементтерді жылжыту үшін сүйреңіз, өлшемін өзгерту үшін бұрышынан тартыңыз, мәтінді түзету үшін қос шертіңіз.
 	Choose an image	Суретті таңдаңыз
 	Export to Image	Суретке экспорттау
 	Export to Text	Мәтінге экспорттау

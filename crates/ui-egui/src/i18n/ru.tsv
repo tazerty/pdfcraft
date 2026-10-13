@@ -753,7 +753,7 @@
 	Flip vertical	Отразить по вертикали
 	Replace image	Заменить изображение
 	Crop (% trimmed from each side)	Обрезать (% с каждой стороны)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Щёлкните на странице, чтобы добавить текст; каждый щелчок создаёт новое поле, ✓ завершает. Перетаскивайте элементы для перемещения, угол — для размера, двойной щелчок по тексту — для редактирования.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	Щёлкните на странице, чтобы добавить текст; каждый щелчок создаёт новое поле. Перетаскивайте элементы для перемещения, угол — для размера, двойной щелчок по тексту — для редактирования.
 	Choose an image	Выберите изображение
 	Export to Image	Экспортировать в изображение
 	Export to Text	Экспортировать в текст

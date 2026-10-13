@@ -374,6 +374,8 @@ jobs:
         env:
           PKG: ${{ steps.pkg.outputs.pkg }}
           REPORT: ${{ steps.meta.outputs.report }}
+          # E10 vérifié au rendu : le moteur audite chaque texte dessiné (window.__evoraE10).
+          EVORA_SMOKE_QUERY: "?evora-audit=1"
         run: |
           set -euo pipefail
           google-chrome --version

@@ -839,7 +839,7 @@ key	Space	Mezerník
 	Flip vertical	Převrátit svisle
 	Replace image	Nahradit obrázek
 	Crop (% trimmed from each side)	Oříznout (% z každé strany)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Kliknutím na stránku přidáte text; každé kliknutí založí nový rámeček a ✓ úpravy dokončí. Položky přesunete přetažením, velikost změníte tažením za roh, text upravíte dvojitým kliknutím.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	Kliknutím na stránku přidáte text; každé kliknutí založí nový rámeček. Položky přesunete přetažením, velikost změníte tažením za roh, text upravíte dvojitým kliknutím.
 	Choose an image	Vyberte obrázek
 	Export to Image	Exportovat jako obrázek
 	Export to Text	Exportovat jako text
