@@ -784,6 +784,10 @@ pub struct PdfCraftApp {
     pub host_save: Option<HostSaveFn>,
     /// Reports unsaved work to the embedding page (web, see [`HostDirtyFn`]).
     pub host_dirty: Option<HostDirtyFn>,
+    /// Evora (E5): the browser-storage key the settings are saved under (signatures, initials,
+    /// certificates and stamps included). Upstream's shared `"pdfcraft"` by default; Evora uses a
+    /// per-account namespace (`storageNs`) or `None`, which keeps the settings in memory only.
+    pub storage_key: Option<String>,
     /// A pending "save changes?" question (closing a dirty tab or quitting).
     pub close_request: Option<CloseRequest>,
     /// The button of the "save changes?" question the keyboard has chosen; Save when it opens.
@@ -1182,6 +1186,7 @@ impl PdfCraftApp {
             os_events: None,
             host_save: None,
             host_dirty: None,
+            storage_key: Some("pdfcraft".to_owned()),
             close_request: None,
             save_prompt_button: Default::default(),
             save_prompt_seen: false,
@@ -3478,7 +3483,16 @@ impl eframe::App for PdfCraftApp {
             let minimized = self.ctx.as_ref().is_some_and(|c| c.input(|i| i.viewport().minimized == Some(true)));
             self.window_state.keep(storage, minimized);
         }
-        storage.set_string("pdfcraft", self.persist());
+        // Evora (E5): only under the chosen key; nothing at all without one.
+        if let Some(key) = self.storage_key.clone() {
+            storage.set_string(&key, self.persist());
+        }
+    }
+
+    /// Evora (E5): egui's own memory (`egui_memory_ron`, one key for the whole origin) is written
+    /// only in upstream's shared mode, never under an Evora namespace or in memory-only mode.
+    fn persist_egui_memory(&self) -> bool {
+        self.storage_key.as_deref() == Some("pdfcraft")
     }
 
     /// Each frame's work before drawing: opens, operating-system and control-channel requests,

@@ -27,10 +27,13 @@ fn main() {
                     if query_param("evora-audit").as_deref() == Some("1") {
                         cc.egui_ctx.add_plugin(e10::Audit::new(query_param("evora-probe")));
                     }
-                    // "printcraft": settings saved under the app's former name, PrintCraft.
-                    if let Some(json) = cc.storage.and_then(|s| s.get_string("pdfcraft").or_else(|| s.get_string("printcraft"))) {
-                        app.restore(&json);
-                    }
+                    // Evora (E5): the browser storage is a namespace per Evora account. Settings are kept
+                    // under `evora.pdfcraft.<storageNs>`, the namespace the host sends in `evora:init`
+                    // (HOST-PROTOCOL.md §4.3, §7.7); until it arrives they stay in memory only. Upstream's
+                    // shared keys ("pdfcraft", and "printcraft" from the app's former name), readable by
+                    // every account of the browser, are neither read nor written, and are purged.
+                    app.storage_key = None;
+                    storage_ns::purge_legacy();
                     // Evora (E3): `?lang=` and `?theme=` impose the first language and theme, read
                     // after the saved settings so the host's choice wins (HOST-PROTOCOL.md §2.4).
                     if let Some(code) = query_param("lang").and_then(|tag| evora_lang(&tag)) {
@@ -93,6 +96,67 @@ fn warn_before_unload(unsaved: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     });
     if window.add_event_listener_with_callback("beforeunload", handler.as_ref().unchecked_ref()).is_ok() {
         handler.forget();
+    }
+}
+
+/// Evora (E5): the engine's browser storage as a namespace per Evora account (`storageNs`, an
+/// opaque HMAC of the account, sent by the host). A namespace, not a partition: any script of the
+/// engine's origin can still list every key; the isolation comes from serving the engine on its
+/// own site (mode B). This engine keeps its settings in localStorage only (no OPFS, no IndexedDB).
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)] // `read` and `purge` serve the host bridge's `evora:init` and `evora:purge`.
+mod storage_ns {
+    /// Upstream's keys, shared by every account of the browser.
+    const LEGACY: [&str; 2] = ["pdfcraft", "printcraft"];
+    /// Prefix of the namespaced keys.
+    const PREFIX: &str = "evora.pdfcraft.";
+
+    /// `storageNs` is 64 lowercase hexadecimal digits (HOST-PROTOCOL.md §4.3); anything else is refused.
+    pub fn valid(ns: &str) -> bool {
+        ns.len() == 64 && ns.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    /// The key holding namespace `ns`'s settings.
+    pub fn key(ns: &str) -> Option<String> {
+        valid(ns).then(|| format!("{PREFIX}{ns}"))
+    }
+
+    fn storage() -> Option<web_sys::Storage> {
+        web_sys::window()?.local_storage().ok()?
+    }
+
+    /// The saved settings of namespace `ns`.
+    pub fn read(ns: &str) -> Option<String> {
+        storage()?.get_item(&key(ns)?).ok()?
+    }
+
+    /// Remove upstream's shared keys.
+    pub fn purge_legacy() {
+        if let Some(s) = storage() {
+            for k in LEGACY {
+                let _ = s.remove_item(k);
+            }
+        }
+    }
+
+    /// Remove this engine's namespaced keys except namespace `keep`, and the shared ones.
+    /// `keep: None` removes every namespace (`evora:purge` with `scope: "all"`).
+    pub fn purge(keep: Option<&str>) {
+        purge_legacy();
+        let Some(s) = storage() else { return };
+        let keep = keep.and_then(key);
+        let mut doomed = Vec::new();
+        for i in 0..s.length().unwrap_or(0) {
+            if let Ok(Some(k)) = s.key(i)
+                && k.starts_with(PREFIX)
+                && Some(&k) != keep.as_ref()
+            {
+                doomed.push(k);
+            }
+        }
+        for k in doomed {
+            let _ = s.remove_item(&k);
+        }
     }
 }
 
