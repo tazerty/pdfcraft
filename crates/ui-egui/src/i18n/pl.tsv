@@ -713,7 +713,7 @@
 	Flip vertical	Odbij w pionie
 	Replace image	Zastąp obraz
 	Crop (% trimmed from each side)	Przytnij (% usuwany z każdej strony)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Kliknij stronę, aby dodać tekst; każde kliknięcie tworzy nowe pole, a ✓ kończy edycję. Przeciągaj elementy, aby je przenosić, i narożnik, aby zmieniać rozmiar. Kliknij tekst dwukrotnie, aby go edytować.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	Kliknij stronę, aby dodać tekst; każde kliknięcie tworzy nowe pole. Przeciągaj elementy, aby je przenosić, i narożnik, aby zmieniać rozmiar. Kliknij tekst dwukrotnie, aby go edytować.
 	Choose an image	Wybierz obraz
 	Export to Image	Eksportuj do obrazu
 	Export to Text	Eksportuj do tekstu

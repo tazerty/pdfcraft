@@ -402,7 +402,7 @@
 	Flip vertical	Обърни вертикално
 	Replace image	Замени изображението
 	Crop (% trimmed from each side)	Изрязване (% отрязани от всяка страна)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Щракнете върху страницата, за да добавите текст; всяко щракване създава ново поле, а ✓ завършва. Плъзнете елементите, за да ги преместите, плъзнете ъгъл, за да промените размера, щракнете двукратно върху текст, за да го редактирате.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	Щракнете върху страницата, за да добавите текст; всяко щракване създава ново поле. Плъзнете елементите, за да ги преместите, плъзнете ъгъл, за да промените размера, щракнете двукратно върху текст, за да го редактирате.
 	Choose an image	Изберете изображение
 	Export to Image	Експортиране като изображение
 	Export to Text	Експортиране като текст
