@@ -74,6 +74,8 @@ pub mod bulk_fields;
 mod dialogs;
 mod edit_text_ui;
 mod editing;
+// Evora (E7): neutralised commands (update check, outbound project links).
+mod evora;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_watch;
 mod files;
