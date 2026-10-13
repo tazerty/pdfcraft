@@ -52,7 +52,8 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
     let q = pdfcraft_render::text::fold_case(app.palette_query.trim());
     let mut hits: Vec<(usize, Hit)> = Vec::new();
     let active = app.active_ids().map(|(_, id)| id);
-    for spec in pdfcraft_engine::commands::COMMANDS {
+    // Evora (E7): neutralised commands stay out of the palette.
+    for spec in pdfcraft_engine::commands::COMMANDS.iter().filter(|spec| !crate::evora::hidden(spec.id)) {
         let label = pdfcraft_engine::commands::current_label(spec, &app.session, active);
         let translated = crate::i18n::command_label(&label);
         if let Some(s) = score(&translated, &q).or_else(|| score(&label, &q)).or_else(|| score(spec.id, &q).map(|s| s + 50)) {
