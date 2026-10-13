@@ -19,7 +19,9 @@
 # d'hébergement (0) ; émojis des catalogues affichés (E10) ; termes sensibles affichés après le
 # catalogue de surcharge (E9) ; empreintes CSP des scripts inline ; test de fumée Chrome depuis une
 # origine différente (avec et sans CSP), avec audit au rendu des émojis et des termes (E9, E10).
-# Mesures imprimées : taille du .wasm (brut, .br, .gz), démarrage à froid.
+# Mesures imprimées : taille du .wasm (brut, .br, .gz), démarrage à froid, polices embarquées.
+# Le test de fumée couvre aussi E3 (langue et thème par l'URL), E4 (pont EHP v1 avec une origine
+# parente admise par evora-host.json) et E5 (clés partagées de l'amont ni appliquées ni gardées).
 #
 # Sortie : artefact de run evora-colophon-atelier-web-<tag> (archive .zip avec .br/.gz, LICENSES/
 # et csp-hashes.txt ; SHA256SUMS ; BUILD-INFO.txt ; csp-hashes.txt) et artefact evora-smoke-<tag>.
@@ -311,6 +313,10 @@ jobs:
           done
           # Licences des dépendances Rust (cargo-about).
           cp "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt" "$PKG/LICENSES/THIRD-PARTY-LICENSES.txt"
+          # E4 : origines parentes admises par le pont EHP (?host=evora). Vide dans l'artefact :
+          # le provisionnement d'Evora l'écrit depuis engines.json (HOST-PROTOCOL §2.3) ; vide,
+          # le pont reste muet.
+          printf '{"parentOrigins": []}\n' > "$PKG/evora-host.json"
           {
             echo "work=$WORK"
             echo "pkg=$PKG"

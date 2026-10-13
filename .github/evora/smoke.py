@@ -71,7 +71,64 @@ def engine_csp(hashes):
             f"frame-ancestors {PARENT_ORIGIN}; object-src 'none'; base-uri 'none'")
 
 
-def parent_page(query):
+def minimal_pdf():
+    """Un PDF d'une page, xref exacte : le document que la page parente ouvre par evora:open."""
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>"]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n" % (len(objs) + 1) + b"0000000000 65535 f \n"
+    for o in offsets:
+        out += b"%010d 00000 n \n" % o
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
+# Coquille minimale (page parente du scénario « pont-ehp », HOST-PROTOCOL.md) : vérifie source et
+# origine, répond à evora:ready par un evora:init invalide (v: 2, doit rester sans réponse) puis par
+# un evora:init valide, puis ouvre un PDF par evora:open. Tout ce qui arrive est journalisé.
+HOST_HARNESS = """
+const ENGINE = "%(engine)s";
+const A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+let n = 0;
+const ulid = () => { n += 1; return "01JZZZZZZZZZZZZZZZZZZZZZ" + A[(n >> 5) %% 32] + A[n %% 32]; };
+const PDF = "%(pdf)s";
+const ids = window.__evoraIds = {};
+const log = window.__evoraLog = [];
+const frame = document.getElementById("engine");
+const send = (m, transfer) => frame.contentWindow.postMessage(m, ENGINE, transfer || []);
+addEventListener("message", (e) => {
+  const d = e.data;
+  const fromEngine = e.source === frame.contentWindow && e.origin === ENGINE;
+  const plain = d !== null && typeof d === "object" && Object.getPrototypeOf(d) === Object.prototype;
+  log.push({origin: e.origin, fromEngine, plain, keys: plain ? Object.keys(d) : [], v: plain ? d.v : null,
+            type: plain ? d.type : null, id: plain ? d.id : null, re: plain ? (d.re || null) : null,
+            payload: plain && d.payload ? JSON.parse(JSON.stringify(d.payload,
+              (k, v) => v instanceof ArrayBuffer ? {byteLength: v.byteLength} : v)) : null});
+  if (!fromEngine || !plain || d.v !== 1) return;
+  if (d.type === "evora:ready") {
+    ids.ready = d.id;
+    ids.bogus = ulid();
+    send({v: 2, type: "evora:init", id: ids.bogus, re: d.id, payload: {}});
+    ids.init = ulid();
+    send({v: 1, type: "evora:init", id: ids.init, re: d.id, payload: {
+      lang: "fr", engineLang: "fr", theme: "dark", accent: "#4F46E5", readOnly: false,
+      storageNs: "ab".repeat(32), displayName: "Compte Evora", capabilities: d.payload.capabilities,
+      prefs: {}, limits: {maxDocumentBytes: 1048576, maxExportBytes: 1048576}}});
+  } else if (d.type === "evora:ack" && d.re === ids.init && d.payload && d.payload.ok === true) {
+    const bytes = Uint8Array.from(atob(PDF), (c) => c.charCodeAt(0)).buffer;
+    ids.open = ulid();
+    send({v: 1, type: "evora:open", id: ids.open, payload: {docRef: ulid(), name: "evora-smoke.pdf", bytes}}, [bytes]);
+  }
+});
+"""
+
+
+def parent_page(query, host=False):
+    harness = HOST_HARNESS % {"engine": ENGINE_ORIGIN, "pdf": base64.b64encode(minimal_pdf()).decode()} if host else ""
     return f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Evora smoke</title></head>
 <body style="margin:0;background:#fff">
@@ -83,6 +140,7 @@ addEventListener("message", (e) => {{
   const d = e.data;
   window.__evoraMessages.push({{origin: e.origin, type: (d && typeof d === "object" && typeof d.type === "string") ? d.type : null}});
 }});
+{harness}
 </script>
 </body></html>
 """.encode()
@@ -92,6 +150,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     csp = None
     page = None
     served = None
+    host_config = None
 
     def log_message(self, fmt, *args):  # journal sobre, consigné par le test
         if self.served is not None:
@@ -108,6 +167,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
+        if self.host_config is not None and self.path.split("?")[0] == "/evora-host.json":
+            # Ce qu'écrit le provisionnement d'Evora à côté d'index.html (HOST-PROTOCOL §2.3).
+            body = json.dumps(self.host_config).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.page is not None:
             if self.path.split("?")[0] in ("/", "/index.html"):
                 body = self.page
@@ -126,8 +194,8 @@ class V6Server(http.server.ThreadingHTTPServer):
     address_family = socket.AF_INET6
 
 
-def start_server(port, host, directory=None, csp=None, page=None, served=None):
-    handler = type("H", (Handler,), {"csp": csp, "page": page, "served": served})
+def start_server(port, host, directory=None, csp=None, page=None, served=None, host_config=None):
+    handler = type("H", (Handler,), {"csp": csp, "page": page, "served": served, "host_config": host_config})
     if directory is not None:
         handler = functools.partial(handler, directory=directory)
     server_class = V6Server if ":" in host else http.server.ThreadingHTTPServer
@@ -273,11 +341,13 @@ RESOURCES = """JSON.stringify(performance.getEntriesByType('resource').map(e => 
 def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expect=None):
     served = []
     expect = expect or {}
-    engine = start_server(PORT_A, "127.0.0.1", directory=site, csp=csp, served=served)
-    parent = start_server(PORT_B, "127.0.0.1", page=parent_page(query), served=served)
+    host = bool(expect.get("ehp"))
+    engine = start_server(PORT_A, "127.0.0.1", directory=site, csp=csp, served=served,
+                          host_config={"parentOrigins": [PARENT_ORIGIN]} if host else None)
+    parent = start_server(PORT_B, "127.0.0.1", page=parent_page(query, host), served=served)
     # « localhost » peut se résoudre en ::1 : la page parente écoute aussi en IPv6 quand c'est possible.
     try:
-        parent6 = start_server(PORT_B, "::1", page=parent_page(query), served=served)
+        parent6 = start_server(PORT_B, "::1", page=parent_page(query, host), served=served)
     except OSError:
         parent6 = None
     profile = tempfile.mkdtemp(prefix=f"evora-smoke-{name}-")
@@ -389,6 +459,8 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
             settle_end = time.monotonic() + SETTLE
             while time.monotonic() < settle_end:
                 chrome.pump(0.1)
+            if host:
+                check_ehp(chrome, page, result, errors)
             gl = chrome.call("Runtime.evaluate", {"expression": GL_PROBE, "contextId": ctx, "returnByValue": True}, sess)
             result["gl"] = gl.get("result", {}).get("value")
             if result["gl"] != "webgl2":
@@ -432,6 +504,45 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
     return result
 
 
+LOG_EXPR = "JSON.stringify({log: window.__evoraLog || [], ids: window.__evoraIds || {}})"
+
+
+def check_ehp(chrome, page, result, errors):
+    """E4 : poignée de main EHP v1 vue de la page parente (HOST-PROTOCOL.md §3, §4, §5)."""
+    end = time.monotonic() + 30
+    state = {}
+    while time.monotonic() < end:
+        chrome.pump(0.2)
+        r = chrome.call("Runtime.evaluate", {"expression": LOG_EXPR, "returnByValue": True}, page)
+        state = json.loads(r.get("result", {}).get("value", "{}") or "{}")
+        ids = state.get("ids", {})
+        if ids.get("open") and any(m.get("re") == ids["open"] for m in state.get("log", [])):
+            break
+    log, ids = state.get("log", []), state.get("ids", {})
+    result["ehp"] = {"messages": [{k: m.get(k) for k in ("type", "re", "payload")} for m in log], "ids": ids}
+    for m in log:
+        if not (m.get("fromEngine") and m.get("plain") and m.get("v") == 1):
+            errors.append(f"[ehp] message hors norme ou d'une autre source : {m}")
+        elif not set(m.get("keys", [])) <= {"v", "type", "id", "re", "payload"}:
+            errors.append(f"[ehp] enveloppe avec un champ inconnu : {m.get('keys')}")
+    ready = [m for m in log if m.get("type") == "evora:ready"]
+    if len(ready) != 1:
+        errors.append(f"[ehp] evora:ready reçu {len(ready)} fois (attendu : 1)")
+    else:
+        p = ready[0].get("payload") or {}
+        caps = set(p.get("capabilities") or [])
+        if p.get("app") != "colophon-atelier" or p.get("ehp") != "1.0" or not {"doc.open", "doc.save"} <= caps:
+            errors.append(f"[ehp] evora:ready inattendu : {p}")
+    def ack(re):
+        return [m for m in log if m.get("type") == "evora:ack" and m.get("re") == re]
+    if [m for m in log if ids.get("bogus") and m.get("re") == ids["bogus"]]:
+        errors.append("[ehp] le moteur a répondu à un evora:init de version 2 (doit l'ignorer)")
+    for step in ("init", "open"):
+        got = ack(ids.get(step)) if ids.get(step) else []
+        if len(got) != 1 or (got[0].get("payload") or {}).get("ok") is not True:
+            errors.append(f"[ehp] accusé de evora:{step} absent ou négatif : {got}")
+
+
 def main(argv):
     if len(argv) != 5:
         print(__doc__)
@@ -457,6 +568,11 @@ def main(argv):
         # E3 : langue et thème imposés par l'URL du moteur, vérifiés au rendu.
         results.append(run_scenario("fr-sombre", site, engine_csp(hashes), out_dir, chrome_bin, fr,
                                     {"probe": "Bienvenue", "dark": True}))
+        # E4 : pont EHP natif, origine parente admise par evora-host.json ; evora:init impose le
+        # thème sombre, evora:open ouvre « evora-smoke.pdf » (son onglet doit être dessiné).
+        results.append(run_scenario("pont-ehp", site, engine_csp(hashes), out_dir, chrome_bin,
+                                    f"?host=evora&evora-audit=1&evora-probe=evora-smoke",
+                                    {"probe": "evora-smoke", "dark": True, "ehp": True}))
         # E5 : les réglages laissés par un autre compte sous les clés partagées ne s'appliquent pas
         # (la langue « ja » semée ne doit pas apparaître : « Welcome » reste dessiné) et sont purgés.
         results.append(run_scenario("stockage", site, engine_csp(hashes), out_dir, chrome_bin, en,
@@ -486,6 +602,11 @@ def main(argv):
             if wasm:
                 log(f"- {r['scenario']} : .wasm chargé en {wasm[0]['dur']} ms ({wasm[0]['size']} octets transférés, sans compression HTTP)")
             log(f"- {r['scenario']} : messages reçus par la page parente : {r.get('parent_messages', [])}")
+            if "ehp" in r:
+                log(f"- {r['scenario']} : échanges EHP vus de la page parente : "
+                    + " ; ".join(f"{m['type']}" + (f" (re {m['re'][-4:]})" if m.get('re') else "")
+                                 + (f" {json.dumps(m['payload'], ensure_ascii=False)[:160]}" if m.get('payload') else "")
+                                 for m in r["ehp"]["messages"]))
             if "storage_keys" in r:
                 log(f"- {r['scenario']} : clés localStorage de l'origine moteur après rechargement : {r['storage_keys']}")
             if "audit" in r:
