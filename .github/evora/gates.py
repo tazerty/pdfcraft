@@ -7,6 +7,7 @@ Sous-commandes :
   csp PKG OUT                empreintes sha256-… des scripts inline d'index.html (CSP), une par ligne.
   compress PKG               fichiers .br (brotli -q 11) et .gz (gzip -9 -n) à côté de chaque ressource web.
   sizes PKG REPORT           tailles (.wasm brut, .br, .gz ; site complet).
+  fonts CRAFT_DIR REPORT     polices craft-fonts embarquées dans le build web (E6, mesure).
 
 Chaque mesure est écrite dans REPORT (Markdown, repris dans le résumé du job) et dans le journal.
 """
@@ -392,6 +393,48 @@ def cmd_sizes(pkg, report_path):
     return 0
 
 
+# Même sélection que crates/fonts/build.rs (cible wasm32) : faces embarquées dans le .wasm.
+BARRED_FAMILIES = ("Source Han", "Source Serif", "Source Sans", "Noto Sans CJK", "Noto Serif CJK")
+
+
+def cmd_fonts(craft_dir, report_path):
+    """E6 : polices craft-fonts embarquées dans le build web et polices laissées de côté (mesure)."""
+    embedded, left, barred = [], [], []
+    with open(os.path.join(craft_dir, "fonts", "manifest.txt"), encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            cols = [c.strip() for c in line.split(" | ")]
+            if len(cols) < 4:
+                print(f"::error::ligne de manifeste craft-fonts illisible : {line}")
+                return 1
+            family, style, file, scripts = cols[:4]
+            scripts = [x.strip() for x in scripts.split(",")]
+            size = os.path.getsize(os.path.join(craft_dir, file)) if os.path.exists(os.path.join(craft_dir, file)) else 0
+            row = (family, style, ",".join(scripts), size)
+            if any(family.startswith(b) for b in BARRED_FAMILIES):
+                barred.append(row)
+            elif (family == "BIZ UDPGothic" and style == "Regular") or set(scripts) & {"Arab", "Telu", "Hebr", "Thai"}:
+                embedded.append(row)
+            else:
+                left.append(row)
+    with open(report_path, "a", encoding="utf-8") as report:
+        log(report, "### Polices craft-fonts (E6, mesure)")
+        log(report)
+        log(report, "| Face embarquée dans le .wasm | Écritures | Octets |")
+        log(report, "|---|---|---|")
+        for family, style, scripts, size in embedded:
+            log(report, f"| {family} {style} | {scripts} | {size} |")
+        log(report)
+        log(report, f"Embarquées : {len(embedded)} faces, {sum(r[3] for r in embedded)} octets ; laissées hors du build web par "
+                    f"crates/fonts/build.rs : {len(left)} faces, {sum(r[3] for r in left)} octets ; écartées par AGENTS.md §1.1 "
+                    f"de l'amont : {len(barred)} faces.")
+        log(report)
+    print(f"::notice::craft-fonts embarquées : {len(embedded)} faces, {sum(r[3] for r in embedded)} octets")
+    return 0 if embedded else 1
+
+
 def main(argv):
     if len(argv) >= 2 and argv[1] == "check" and len(argv) == 5:
         return cmd_check(argv[2], argv[3], argv[4])
@@ -401,6 +444,8 @@ def main(argv):
         return cmd_compress(argv[2])
     if len(argv) >= 2 and argv[1] == "sizes" and len(argv) == 4:
         return cmd_sizes(argv[2], argv[3])
+    if len(argv) >= 2 and argv[1] == "fonts" and len(argv) == 4:
+        return cmd_fonts(argv[2], argv[3])
     print(__doc__)
     return 2
 
