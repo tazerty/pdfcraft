@@ -221,6 +221,9 @@ impl LangInfo {
             for error in errors {
                 log::warn!("{} interface catalog: {error}; that entry shows in English", self.code);
             }
+            // Evora (E9): display overrides first, then the right-to-left display order.
+            let code = self.code;
+            catalog.map_translations(|t| evora_display(code, t).unwrap_or_else(|| t.to_owned()));
             if self.rtl {
                 catalog.map_translations(crate::bidi::display_rtl);
             }
@@ -431,9 +434,79 @@ pub fn key_name(s: &str) -> &str {
     current().catalog().contextual("key", s).unwrap_or(s)
 }
 
-/// Translate an English UI string; unknown strings come back unchanged.
+/// Translate an English UI string; unknown strings come back unchanged (Evora: with the display
+/// overrides of [`evora_display`] applied, see `evora-overrides.txt`).
 pub fn tr(lang: Lang, s: &str) -> &str {
-    lang.catalog().plain(s).unwrap_or(s)
+    lang.catalog().plain(s).unwrap_or_else(|| evora_english(s))
+}
+
+/// Evora (E9): the display-override catalogue (`evora-overrides.txt`). Third-party product names
+/// are renamed where the interface shows them, in every language, English included, without
+/// touching the engine crates: literal replacements, in file order.
+static EVORA_OVERRIDES: &str = include_str!("evora-overrides.txt");
+
+struct DisplayRule {
+    lang: &'static str,
+    from: &'static str,
+    to: &'static str,
+}
+
+fn display_rules() -> &'static [DisplayRule] {
+    static RULES: OnceLock<Vec<DisplayRule>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        EVORA_OVERRIDES
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+            .filter_map(|line| {
+                let mut columns = line.split('\t');
+                let (Some(lang), Some(from), Some(to), None) = (columns.next(), columns.next(), columns.next(), columns.next()) else {
+                    log::warn!("evora-overrides.txt: malformed line {line:?}");
+                    return None;
+                };
+                (!from.is_empty()).then_some(DisplayRule { lang, from, to })
+            })
+            .collect()
+    })
+}
+
+/// `text` with the display overrides for language `code` (its own rules and the `*` ones)
+/// applied; `None` when no rule applies, so the hot path allocates nothing.
+pub fn evora_display(code: &str, text: &str) -> Option<String> {
+    let applies = |r: &&DisplayRule| r.lang == "*" || r.lang == code;
+    if !display_rules().iter().filter(applies).any(|r| text.contains(r.from)) {
+        return None;
+    }
+    let mut out = text.to_owned();
+    for rule in display_rules().iter().filter(applies) {
+        if out.contains(rule.from) {
+            out = out.replace(rule.from, rule.to);
+        }
+    }
+    Some(out)
+}
+
+/// A raw engine or system message (shown as it comes, see `notify_error`) with the exact-phrase
+/// `msg` overrides applied.
+pub fn evora_message(text: String) -> String {
+    evora_display("msg", &text).unwrap_or(text)
+}
+
+/// [`evora_display`] for an English string (the source language, or a missing translation). The
+/// rewritten strings are kept for the life of the process so lookups can keep returning `&str`;
+/// only interface strings that carry an overridden name are ever stored.
+fn evora_english(s: &str) -> &str {
+    static SHOWN: OnceLock<std::sync::Mutex<std::collections::HashMap<String, &'static str>>> = OnceLock::new();
+    if !display_rules().iter().any(|r| (r.lang == "*" || r.lang == "en") && s.contains(r.from)) {
+        return s;
+    }
+    let Ok(mut shown) = SHOWN.get_or_init(Default::default).lock() else { return s };
+    if let Some(done) = shown.get(s).copied() {
+        return done;
+    }
+    let Some(text) = evora_display("en", s) else { return s };
+    let text: &'static str = Box::leak(text.into_boxed_str());
+    shown.insert(s.to_owned(), text);
+    text
 }
 
 /// How the layers below say their own sentences in the current language.
