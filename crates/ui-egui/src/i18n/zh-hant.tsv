@@ -363,7 +363,7 @@
 	Flip vertical	垂直翻轉
 	Replace image	替換圖片
 	Crop (% trimmed from each side)	裁切（從每條邊修剪的百分比）
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	按一下頁面新增文字；每次按一下開始一個新文字框，✓ 完成。拖動專案以移動，拖動角落以調整大小，按兩下文字進行編輯。
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	按一下頁面新增文字；每次按一下開始一個新文字框。拖動專案以移動，拖動角落以調整大小，按兩下文字進行編輯。
 	Choose an image	選擇圖片
 	Export to Image	匯出為圖片
 	Export to Text	匯出為文字

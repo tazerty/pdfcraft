@@ -314,8 +314,15 @@ fn paint_unbaked_widget(painter: &egui::Painter, xf: &PageXform, f: &FormField, 
             painter.rect_stroke(r, CornerRadius::same(1), Stroke::new(1.0, Color32::from_gray(180)), egui::StrokeKind::Inside);
             let checked = f.value.first().is_some_and(|v| v != "Off" && !v.is_empty());
             if checked {
-                let sz = (r.height() * 0.75).clamp(8.0, 32.0);
-                painter.text(r.center(), egui::Align2::CENTER_CENTER, "✔", egui::FontId::proportional(sz), Color32::BLACK);
+                // Evora (E10): a drawn check mark, not the ✔ dingbat (no emoji glyph in the interface).
+                let s = r.height().min(r.width());
+                let c = r.center();
+                let mark = vec![
+                    egui::pos2(c.x - 0.30 * s, c.y + 0.02 * s),
+                    egui::pos2(c.x - 0.08 * s, c.y + 0.24 * s),
+                    egui::pos2(c.x + 0.32 * s, c.y - 0.24 * s),
+                ];
+                painter.add(egui::Shape::line(mark, Stroke::new((s * 0.12).clamp(1.0, 4.0), Color32::BLACK)));
             }
         }
         FormFieldKind::Radio => {

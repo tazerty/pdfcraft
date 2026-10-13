@@ -410,7 +410,7 @@
 	Flip vertical	垂直翻转
 	Replace image	替换图像
 	Crop (% trimmed from each side)	裁剪（从每条边修剪的百分比）
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	单击页面添加文本；每次单击开始一个新文本框，✓ 完成。拖动项目以移动，拖动角落以调整大小，双击文本进行编辑。
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	单击页面添加文本；每次单击开始一个新文本框。拖动项目以移动，拖动角落以调整大小，双击文本进行编辑。
 	Choose an image	选择图像
 	Export to Image	导出为图像
 	Export to Text	导出为文本

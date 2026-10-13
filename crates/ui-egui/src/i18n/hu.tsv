@@ -693,7 +693,7 @@
 	Flip vertical	Függőleges tükrözés
 	Replace image	Kép cseréje
 	Crop (% trimmed from each side)	Levágás (mindkét oldalról levágott %)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Kattints az oldalra szöveg hozzáadásához; minden kattintás új dobozt kezd, a ✓ befejezi. Húzd az elemeket az áthelyezéshez, a sarkot a méretezéshez, és kattints duplán a szövegre a szerkesztéshez.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	Kattints az oldalra szöveg hozzáadásához; minden kattintás új dobozt kezd. Húzd az elemeket az áthelyezéshez, a sarkot a méretezéshez, és kattints duplán a szövegre a szerkesztéshez.
 	Choose an image	Kép kiválasztása
 	Export to Image	Exportálás képként
 	Export to Text	Exportálás szövegként
