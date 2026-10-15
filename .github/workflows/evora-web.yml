@@ -21,9 +21,11 @@
 # origine différente (avec et sans CSP), avec audit au rendu des émojis et des termes (E9, E10).
 # Mesures imprimées : taille du .wasm (brut, .br, .gz), démarrage à froid, polices embarquées.
 # Le test de fumée couvre aussi E3 (langue et thème par l'URL), E4 (pont EHP v1 avec une origine
-# parente admise par evora-host.json, origine non admise ignorée) et E5 (stockage par storageNs,
-# purge au démarrage et sur evora:purge, accusé après effacement, écritures arrêtées ; hors pont,
-# amont inchangé), avec un témoin sabordé (removeItem sans effet dans le moteur) qui doit rougir.
+# parente admise par evora-host.json, origine non admise ignorée ; doc.dirty : rien avant evora:open,
+# puis {dirty: false} pour le document ouvert) et E5 (stockage par storageNs, purge au démarrage et
+# sur evora:purge, accusé après effacement, écritures arrêtées ; hors pont, amont inchangé), avec un
+# témoin sabordé (removeItem sans effet dans le moteur, evora:dirty glissé avant evora:open) qui doit
+# rougir.
 #
 # Sortie : artefact de run evora-colophon-atelier-web-<tag> (archive .zip avec .br/.gz, LICENSES/
 # et csp-hashes.txt ; SHA256SUMS ; BUILD-INFO.txt ; csp-hashes.txt) et artefact evora-smoke-<tag>.
