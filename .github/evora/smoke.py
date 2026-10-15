@@ -13,8 +13,15 @@ Scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
   1. « sans CSP » ; 2. « CSP appliquée » : la CSP cible des documents moteur (ARCHITECTURE §3.6),
      avec les empreintes de csp-hashes.txt et frame-ancestors limité à l'origine B ;
   3. « fr-sombre » (E3) ; 4. « pont-ehp » (E4, E5) ; 5. « hors-pont » (E5, amont inchangé sans pont) ;
-  6. « pont-ehp-temoin » : le scénario 4 sur un moteur SABORDÉ (removeItem sans effet), qui DOIT
-     être rouge, et rouge par les seuls détecteurs du stockage : la preuve que le banc sait rougir.
+  6. « pont-ehp-temoin » : le scénario 4 sur un moteur SABORDÉ (removeItem sans effet, et un
+     evora:dirty glissé depuis la fenêtre du moteur avant evora:open), qui DOIT être rouge, et rouge
+     par les seuls détecteurs du stockage et de doc.dirty : la preuve que le banc sait rougir.
+
+doc.dirty (scénario 4, §7.1 étapes 7 et 8) : comme la coquille, qui lit le contenu du document entre
+l'accusé d'evora:init et evora:open, la page parente n'ouvre le PDF qu'après des images du moteur
+(prémisse vérifiée : compteur d'images de l'audit relevé à la réception de chaque message). Le moteur
+ne doit émettre aucun evora:dirty avant l'accusé d'evora:open, puis un evora:dirty {dirty: false}
+portant le docRef du document ouvert.
 
 Le scénario « pont-ehp » ajoute deux documents à la page parente : un observateur servi par
 l'origine A (même stockage que le moteur, il lit le localStorage à l'arrivée de chaque accusé
@@ -123,9 +130,10 @@ def minimal_pdf():
 # Coquille minimale (page parente du scénario « pont-ehp », HOST-PROTOCOL.md) : vérifie source et
 # origine, journalise tout ce qui arrive (horodaté), attend que le banc ait semé le stockage du moteur
 # (window.__evoraGo) pour envoyer un evora:init de version 2 (doit rester sans réponse) puis un
-# evora:init valide, ouvre un PDF par evora:open dès l'accusé d'init, répond evora:saved à un
-# evora:save, et fait lire le stockage du moteur par l'observateur à l'arrivée de chaque accusé
-# d'evora:init et d'evora:purge. Le banc envoie le reste par window.__evoraSend.
+# evora:init valide, ouvre un PDF par evora:open quand le banc le lui dit (window.__evoraOpen, après
+# l'accusé d'init et des images du moteur : la coquille lit d'abord le contenu, §7.1 étape 7), répond
+# evora:saved à un evora:save, et fait lire le stockage du moteur par l'observateur à l'arrivée de
+# chaque accusé d'evora:init et d'evora:purge. Le banc envoie le reste par window.__evoraSend.
 HOST_HARNESS = """
 const ENGINE = "%(engine)s";
 const A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -171,11 +179,6 @@ addEventListener("message", (e) => {
   } else if (d.type === "evora:ack") {
     // L'observateur (même origine, même stockage que le moteur) lit le stockage dès l'accusé reçu.
     if ([ids.init, ids.purge, ids.purgeAll].includes(d.re)) observer.contentWindow.postMessage({probe: d.re}, ENGINE);
-    if (d.re === ids.init && d.payload && d.payload.ok === true && !ids.open) {
-      const bytes = Uint8Array.from(atob(PDF), (c) => c.charCodeAt(0)).buffer;
-      ids.docRef = ulid();
-      send("open", {v: 1, type: "evora:open", id: ulid(), payload: {docRef: ids.docRef, name: "evora-smoke.pdf", bytes}}, [bytes]);
-    }
   } else if (d.type === "evora:save" && !ids.save) {
     ids.save = d.id;
     send("saved", {v: 1, type: "evora:saved", id: ulid(), re: d.id, payload: {ok: true, version: 1}});
@@ -188,6 +191,14 @@ window.__evoraGo = () => {
     lang: "fr", engineLang: "fr", theme: "dark", accent: "#4F46E5", readOnly: false,
     storageNs: "%(ns)s", displayName: "Compte Evora", capabilities: window.__evoraCaps,
     prefs: {}, limits: {maxDocumentBytes: 1048576, maxExportBytes: 1048576}}});
+  return true;
+};
+window.__evoraOpen = () => {
+  const initOk = log.some((m) => m.fromEngine && m.type === "evora:ack" && m.re === ids.init && m.payload && m.payload.ok === true);
+  if (!ids.init || ids.open || !initOk) return false;
+  const bytes = Uint8Array.from(atob(PDF), (c) => c.charCodeAt(0)).buffer;
+  ids.docRef = ulid();
+  send("open", {v: 1, type: "evora:open", id: ulid(), payload: {docRef: ids.docRef, name: "evora-smoke.pdf", bytes}}, [bytes]);
   return true;
 };
 window.__evoraSend = (key, type, payload) => { send(key, {v: 1, type, id: ulid(), payload}); return ids[key]; };
@@ -649,22 +660,25 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
 LOG_EXPR = "JSON.stringify({log: window.__evoraLog || [], ids: window.__evoraIds || {}, obs: window.__evoraObs || {}})"
 
 # Instrument posé par le banc dans le document moteur, avant evora:init : journal des écritures du
-# stockage (sans horloge ; les messages reçus par le moteur y servent de bornes) et, pour le témoin
-# sabordé seulement, un removeItem sans effet.
+# stockage (sans horloge ; les messages reçus par le moteur y servent de bornes, avec le compteur
+# d'images de l'audit à leur réception) et, pour le témoin sabordé seulement, un removeItem sans effet.
 STORE_HOOK = """(() => {
   if (window.__evoraStoreLog) return "déjà posé";
   const S = Storage.prototype;
   const orig = {set: S.setItem, remove: S.removeItem, clear: S.clear};
   const log = window.__evoraStoreLog = [];
   const sabotage = "%(sabotage)s";
+  const noRemove = sabotage.split(" ").includes("no-remove");
   window.__evoraBench = false;
-  const entry = (op, key) => log.push({op, key, bench: window.__evoraBench === true});
+  const entry = (op, key, extra) => log.push(Object.assign({op, key, bench: window.__evoraBench === true}, extra || {}));
   S.setItem = function (k, v) { entry("set", String(k)); return orig.set.call(this, k, v); };
-  S.removeItem = function (k) { entry("remove", String(k)); if (sabotage === "no-remove") return undefined; return orig.remove.call(this, k); };
-  S.clear = function () { entry("clear", null); if (sabotage === "no-remove") return undefined; return orig.clear.call(this); };
+  S.removeItem = function (k) { entry("remove", String(k)); if (noRemove) return undefined; return orig.remove.call(this, k); };
+  S.clear = function () { entry("clear", null); if (noRemove) return undefined; return orig.clear.call(this); };
   addEventListener("message", (e) => {
     const d = e.data;
-    entry("msg", e.origin + " " + (d !== null && typeof d === "object" ? String(d.type) : "?"));
+    const a = window.__evoraAudit;
+    entry("msg", e.origin + " " + (d !== null && typeof d === "object" ? String(d.type) : "?"),
+          {frames: a && typeof a.frames === "number" ? a.frames : null});
   }, true);
   return sabotage ? "posé, sabordage " + sabotage : "posé";
 })()"""
@@ -690,6 +704,13 @@ SNAPSHOT = """(async () => {
   try { out.cache = await caches.keys(); } catch (e) { out.cache = "indisponible : " + e.name; }
   return JSON.stringify(out);
 })()"""
+
+# Témoin sabordé « early-dirty » : un evora:dirty venu de la fenêtre du moteur avant evora:open (le
+# défaut relevé au labo : état modifié annoncé alors qu'aucun document n'est ouvert).
+WITNESS_DIRTY_ID = "01J" + "W" * 23
+EARLY_DIRTY = ("(() => { window.parent.postMessage({v: 1, type: 'evora:dirty', id: '%s', payload: {dirty: false}}, '%s');"
+               " return 'envoyé'; })()") % (WITNESS_DIRTY_ID, PARENT_ORIGIN)
+ENGINE_MSGS = "JSON.stringify((window.__evoraStoreLog || []).filter((op) => op.op === 'msg'))"
 
 # Focus réel du canvas (évalué comme un geste de l'utilisateur), puis l'événement que suit eframe.
 FOCUS = """(() => { const c = document.getElementById("pdfcraft"); c.focus();
@@ -722,6 +743,47 @@ def writes_after(log, message):
     return out
 
 
+def frames_between(msgs, first, then):
+    """Images du moteur achevées entre la réception du dernier `first` précédant le premier `then` et
+    celle de ce `then` (« origine type ») ; `None` si l'instrument n'a pas relevé les deux bornes."""
+    start = end = None
+    for op in msgs:
+        if op.get("key") == then:
+            end = op.get("frames")
+            break
+        if op.get("key") == first:
+            start = op.get("frames")
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return None
+    return end - start
+
+
+def dirty_problems(log, ids):
+    """doc.dirty (§7.1 étape 8, §4.4) : aucun evora:dirty avant que la coquille ait ouvert un document
+    (accusé d'evora:open) ; après cet accusé, un premier evora:dirty {dirty: false} pour ce document ;
+    chacun porte le docRef du document ouvert (un seul document, sans doc.multi)."""
+    engine = [m for m in log if m.get("fromEngine")]
+    opened = next((i for i, m in enumerate(engine)
+                   if ids.get("open") and m.get("type") == "evora:ack" and m.get("re") == ids["open"]), None)
+    if opened is None:
+        return ["accusé d'evora:open absent : contrôle de doc.dirty impossible"]
+    dirty = [(i, m.get("payload") or {}) for i, m in enumerate(engine) if m.get("type") == "evora:dirty"]
+    problems = []
+    early = [p for i, p in dirty if i < opened]
+    if early:
+        problems.append(f"{len(early)} evora:dirty avant l'ouverture d'un document (avant l'accusé d'evora:open) : {early}")
+    late = [p for i, p in dirty if i > opened]
+    expected = {"dirty": False, "docRef": ids.get("docRef")}
+    if not late:
+        problems.append(f"aucun evora:dirty après l'accusé d'evora:open (attendu : {expected})")
+    elif late[0] != expected:
+        problems.append(f"premier evora:dirty après l'ouverture : {late[0]} (attendu : {expected})")
+    stray = [p for p in late if p.get("docRef") != ids.get("docRef")]
+    if stray:
+        problems.append(f"evora:dirty sans le docRef du document ouvert : {stray}")
+    return problems
+
+
 def detector_selftest():
     """Les détecteurs signalent des cas connus et se taisent sur des cas sains : un détecteur muet ne
     peut pas passer pour un vert."""
@@ -730,7 +792,26 @@ def detector_selftest():
     benign = [{"op": "set", "key": "k", "bench": False}, {"op": "msg", "key": purge},
               {"op": "msg", "key": INTRUDER_ORIGIN + " evora:purge"}, {"op": "set", "key": "w", "bench": True}]
     own = NS_PREFIX + NS_OWN
-    return (writes_after(late, purge) == ["k"] and writes_after(benign, purge) == []
+    # doc.dirty : le défaut du labo (état annoncé avant l'ouverture, rien après), le silence après
+    # l'ouverture, un docRef absent ; et une séance saine, que le détecteur laisse passer.
+    ids = {"init": "I", "open": "O", "docRef": "D"}
+
+    def ack(re_id):
+        return {"fromEngine": True, "type": "evora:ack", "re": re_id, "payload": {"ok": True}}
+
+    def dirty(payload):
+        return {"fromEngine": True, "type": "evora:dirty", "payload": payload}
+
+    good = [ack("I"), ack("O"), dirty({"dirty": False, "docRef": "D"}), dirty({"dirty": True, "docRef": "D"})]
+    labo = [ack("I"), dirty({"dirty": False}), ack("O")]
+    silent = [ack("I"), ack("O")]
+    no_ref = [ack("I"), ack("O"), dirty({"dirty": False})]
+    msgs = [{"key": "x evora:init", "frames": 3}, {"key": "x evora:init", "frames": 5}, {"key": "x evora:open", "frames": 9}]
+    dirty_ok = (dirty_problems(good, ids) == [] and len(dirty_problems(labo, ids)) == 2
+                and len(dirty_problems(silent, ids)) == 1 and len(dirty_problems(no_ref, ids)) == 2
+                and frames_between(msgs, "x evora:init", "x evora:open") == 4
+                and frames_between(msgs[:2], "x evora:init", "x evora:open") is None)
+    return (dirty_ok and writes_after(late, purge) == ["k"] and writes_after(benign, purge) == []
             and leftovers([own, WITNESS_KEY], [own]) == [own] and leftovers([WITNESS_KEY], [own]) == []
             and engine_keys([WITNESS_KEY, "pdfcraft", own]) == sorted(["pdfcraft", own]))
 
@@ -846,8 +927,24 @@ def run_ehp(chrome, page, engine, contexts, result, errors, sabotage=""):
                 errors.append("[purge-demarrage] l'espace du compte courant a été effacé au démarrage")
             if WITNESS_KEY not in keys:
                 errors.append(f"[purge-demarrage] clé étrangère au moteur effacée au démarrage ({WITNESS_KEY})")
-        # 4. evora:open (envoyé par la page parente à l'accusé d'init) ; langue et thème à chaud.
+        # 4. doc.dirty (§7.1 étapes 7 et 8) : entre l'accusé d'init et evora:open, le moteur dessine des
+        # images (la coquille lit le contenu du document) et ne doit rien dire de son état modifié. Le
+        # témoin sabordé (« early-dirty ») glisse ici un evora:dirty depuis la fenêtre du moteur.
+        settle(1.5)
+        if "early-dirty" in sabotage.split():
+            store["sabordage_dirty"] = in_engine(EARLY_DIRTY)
+        if evaluate("window.__evoraOpen()", page) is not True:
+            errors.append("[banc] la page parente n'a pas pu envoyer evora:open")
+        # evora:open (octets) ; puis langue et thème à chaud.
         st = wait(lambda s: acks(s, "open"))
+        # Prémisse du contrôle doc.dirty : au moins une image du moteur entre evora:init et evora:open,
+        # sans quoi un evora:dirty prématuré n'aurait pas eu l'occasion de partir.
+        frames = frames_between(json.loads(in_engine(ENGINE_MSGS) or "[]"), PARENT_ORIGIN + " evora:init",
+                                PARENT_ORIGIN + " evora:open")
+        store["images_entre_init_et_open"] = frames
+        if not (isinstance(frames, (int, float)) and frames >= 1):
+            errors.append(f"[banc] aucune image du moteur relevée entre evora:init et evora:open ({frames}) : "
+                          "le contrôle de doc.dirty ne pourrait pas rougir")
         evaluate("window.__evoraSend('lang', 'evora:lang', {lang: 'de', engineLang: 'de'})", page)
         evaluate("window.__evoraSend('themeLight', 'evora:theme', {theme: 'light', accent: '#4F46E5'})", page)
         st = wait(lambda s: acks(s, "lang") and acks(s, "themeLight"))
@@ -956,7 +1053,8 @@ def check_save(st, errors):
 
 def check_envelopes(st, result, errors):
     """Enveloppe et charge utile de chaque message reçu du moteur (§3, §4.4, §4.5) ; un seul
-    evora:ready ; rien en réponse au message de version 2 ; accusés positifs attendus ; doc.dirty."""
+    evora:ready ; rien en réponse au message de version 2 ; accusés positifs attendus ; doc.dirty
+    (aucun evora:dirty avant l'ouverture, puis {dirty: false} pour le document ouvert)."""
     log, ids = st.get("log", []), st.get("ids", {})
     result["ehp"] = {"messages": [{k: m.get(k) for k in ("type", "re", "payload")} for m in log], "ids": ids}
     for m in log:
@@ -1007,12 +1105,15 @@ def check_envelopes(st, result, errors):
             errors.append(f"[ehp] accusé de {step} absent ou négatif : {[g.get('payload') for g in got]}")
     if not [m for m in log if m.get("type") == "evora:dirty"]:
         errors.append("[ehp] aucun evora:dirty (capacité doc.dirty non exercée)")
+    for problem in dirty_problems(log, ids):
+        errors.append(f"[dirty] {problem}")
 
 
 # Témoin sabordé : les détecteurs qui doivent rougir, et eux seuls, quand removeItem est sans effet
-# dans le moteur (le moteur croit effacer, rien ne l'est).
-WITNESS_SABOTAGE = "no-remove"
-WITNESS_EXPECTED = {"purge-demarrage", "purge", "stockage.ns"}
+# dans le moteur (le moteur croit effacer, rien ne l'est) et qu'un evora:dirty part de la fenêtre du
+# moteur avant evora:open.
+WITNESS_SABOTAGE = "no-remove early-dirty"
+WITNESS_EXPECTED = {"purge-demarrage", "purge", "stockage.ns", "dirty"}
 
 
 def error_tags(errors):
@@ -1053,7 +1154,7 @@ def main(argv):
         results.append(run_scenario("hors-pont", site, engine_csp(hashes), out_dir, chrome_bin, en,
                                     {"probe": "Welcome", "dark": False, "upstream_storage": True}))
         # Témoin sabordé : le même banc que « pont-ehp », sur un moteur dont removeItem est sans effet.
-        # Il DOIT être rouge, par les seuls détecteurs du stockage (WITNESS_EXPECTED).
+        # Il DOIT être rouge, par les seuls détecteurs du stockage et de doc.dirty (WITNESS_EXPECTED).
         witness = run_scenario("pont-ehp-temoin", site, engine_csp(hashes), out_dir, chrome_bin, ehp_query,
                                {"probe": "evora-smoke", "dark": True, "ehp": True, "sabotage": WITNESS_SABOTAGE})
         tags = error_tags(witness["errors"])
@@ -1111,7 +1212,8 @@ def main(argv):
             if "audit" in r:
                 log(f"- {r['scenario']} : audit au rendu E9/E10 (window.__evoraAudit) : {r['audit']}")
             if "witness_ok" in r:
-                log(f"- {r['scenario']} : témoin sabordé ({WITNESS_SABOTAGE} : removeItem sans effet dans le moteur) ; "
+                log(f"- {r['scenario']} : témoin sabordé ({WITNESS_SABOTAGE} : removeItem sans effet dans le moteur, "
+                    "evora:dirty glissé avant evora:open) ; "
                     f"détecteurs déclenchés {r['tags']} ; attendus {r['expected_red']} ; "
                     f"{'VALIDE' if r['witness_ok'] else 'INVALIDE : le banc ne rougit pas comme il le doit'}")
             for e in r["errors"]:
