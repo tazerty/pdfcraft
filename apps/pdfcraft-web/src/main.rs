@@ -546,7 +546,8 @@ mod e10 {
 /// Handled: `evora:init`, `evora:open` (bytes), `evora:saved` (checked; without the `doc.saved-ack`
 /// capability the engine does not act on it, so the host keeps its own save state, §6.3),
 /// `evora:lang`, `evora:theme`, `evora:purge`. Sent: `evora:ready`, `evora:failed`, `evora:ack`,
-/// `evora:dirty`, `evora:save`.
+/// `evora:dirty` (only once the host has opened a document, and again after each `evora:open`),
+/// `evora:save`.
 #[cfg(target_arch = "wasm32")]
 mod ehp {
     use std::cell::RefCell;
@@ -612,6 +613,8 @@ mod ehp {
         /// `(name, docRef)` of the documents the host opened, to tell which one a save is.
         docs: Vec<(String, String)>,
         pending_saves: Vec<String>,
+        /// The modified state last told to the host; `None` again after each `evora:open`, so that
+        /// the state of the newly opened document follows its answer (§7.1 step 8).
         last_dirty: Option<bool>,
     }
 
@@ -655,13 +658,16 @@ mod ehp {
             })
         }
 
-        /// `evora:dirty` when unsaved work appears or goes away (`HostDirtyFn`).
+        /// `evora:dirty` when unsaved work appears or goes away (`HostDirtyFn`, told every frame).
+        /// Nothing while the host has opened no document: it would know no document to apply the
+        /// state to (HOST-PROTOCOL.md §4.4, §7.1 step 8). After each `evora:open`, the first frame
+        /// tells the state again, after the answer to the open.
         pub fn dirty_fn(&self) -> pdfcraft_ui_egui::HostDirtyFn {
             let link = self.clone();
             Box::new(move |dirty: bool| {
                 let Some(state) = link.state() else { return };
                 let mut st = state.borrow_mut();
-                if !st.initialized || !st.caps.iter().any(|c| c == "doc.dirty") || st.last_dirty == Some(dirty) {
+                if !st.initialized || st.docs.is_empty() || !st.caps.iter().any(|c| c == "doc.dirty") || st.last_dirty == Some(dirty) {
                     return;
                 }
                 st.last_dirty = Some(dirty);
@@ -961,6 +967,8 @@ mod ehp {
         }
         st.docs.retain(|(n, _)| n != &name);
         st.docs.push((name, doc_ref));
+        // §7.1 step 8: `evora:ack`, then `evora:dirty` for the opened document, on the next frame.
+        st.last_dirty = None;
         ack(&st, id, true, None);
         st.ctx.request_repaint();
     }
