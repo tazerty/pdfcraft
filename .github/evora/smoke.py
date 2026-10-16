@@ -15,7 +15,19 @@ Scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
   3. « fr-sombre » (E3) ; 4. « pont-ehp » (E4, E5) ; 5. « hors-pont » (E5, amont inchangé sans pont) ;
   6. « pont-ehp-temoin » : le scénario 4 sur un moteur SABORDÉ (removeItem sans effet, et un
      evora:dirty glissé depuis la fenêtre du moteur avant evora:open), qui DOIT être rouge, et rouge
-     par les seuls détecteurs du stockage et de doc.dirty : la preuve que le banc sait rougir.
+     par les seuls détecteurs du stockage et de doc.dirty : la preuve que le banc sait rougir ;
+  7. « pont-deux-instances » (E5 entre pages) : quatre moteurs encadrés par la même page, chacun
+     isolant un chemin par lequel une autre page du moteur apprend un effacement :
+     a) deux onglets du même compte (e1, e2) : une purge dans e1, puis une perte de focus dans e2
+        (eframe enregistrerait) ; aucune clé ne doit reparaître, alors que la clé n'existait pas encore
+        (seule la diffusion de la purge peut l'empêcher) ;
+     b) un onglet du même compte ouvert après (e3), puis un AUTRE compte (e4) qui démarre : son
+        evora:init efface les autres espaces, et e3 ne doit pas recréer le sien à sa perte de focus
+        (clé encore absente : seule la diffusion de l'evora:init peut l'empêcher) ;
+     c) e4 écrit sa clé, une autre fenêtre de l'origine l'efface, et une perte de focus ne doit pas
+        la recréer (seul l'événement storage peut l'empêcher) ;
+  8. « pont-deux-instances-temoin » : le scénario 7 avec BroadcastChannel inerte et sans écouteur
+     storage dans les documents moteur, qui DOIT être rouge par ses trois seuls détecteurs.
 
 doc.dirty (scénario 4, §7.1 étapes 7 et 8) : comme la coquille, qui lit le contenu du document entre
 l'accusé d'evora:init et evora:open, la page parente n'ouvre le PDF qu'après des images du moteur
@@ -218,6 +230,8 @@ addEventListener("message", (e) => {
   if (e.origin !== PARENT || e.source !== window.parent) return;
   const d = e.data;
   if (d === null || typeof d !== "object" || typeof d.probe !== "string") return;
+  // Scénario « pont-deux-instances » : une autre fenêtre de l'origine efface une clé du moteur.
+  if (typeof d.remove === "string") localStorage.removeItem(d.remove);
   const all = Object.keys(localStorage).sort();
   window.parent.postMessage({probe: d.probe, all, engine: all.filter((k) => k.startsWith(PREFIX) || LOOSE.includes(k))}, PARENT);
 });
@@ -258,6 +272,91 @@ def parent_page(query, host=False):
 <iframe id="engine" src="{ENGINE_ORIGIN}/index.html{query}" width="{IFRAME_W}" height="{IFRAME_H}"
  style="border:0;display:block" sandbox="allow-scripts allow-same-origin"></iframe>
 {extra}<script>
+window.__evoraMessages = [];
+addEventListener("message", (e) => {{
+  const d = e.data;
+  window.__evoraMessages.push({{origin: e.origin, type: (d && typeof d === "object" && typeof d.type === "string") ? d.type : null}});
+}});
+{harness}
+</script>
+</body></html>
+""".encode()
+
+
+# Scénario « pont-deux-instances » : quatre moteurs (e1 à e4 ; window.name evora-<id>) et
+# l'observateur dans la même page parente. Le banc dit quand envoyer evora:init (__evoraInit) et
+# evora:purge (__evoraSendTo) à chacun, et fait lire, ou effacer puis lire, le localStorage de
+# l'origine moteur par l'observateur (__evoraProbe). Tout message d'une autre source est consigné.
+INSTANCES = ("e1", "e2", "e3", "e4")
+# Deux colonnes de moteurs de 640 × 400 px : tous dans la vue de la page parente (1320 × 840 px).
+INSTANCE_W, INSTANCE_H = 640, 400
+MULTI_HARNESS = """
+const ENGINE = "%(engine)s";
+const A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+let n = 0;
+const ulid = () => { n += 1; return "01JZZZZZZZZZZZZZZZZZZZZZ" + A[(n >> 5) %% 32] + A[n %% 32]; };
+const plainObject = (x) => x !== null && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype;
+const frames = {};
+for (const id of %(ids)s) frames[id] = document.getElementById(id);
+const observer = document.getElementById("observer");
+const st = window.__evoraMulti = {ready: {}, caps: {}, log: [], acks: {}, obs: {}, stray: []};
+addEventListener("message", (e) => {
+  const d = e.data;
+  if (e.source === observer.contentWindow && e.origin === ENGINE) {
+    if (plainObject(d) && typeof d.probe === "string") st.obs[d.probe] = {all: d.all, engine: d.engine};
+    return;
+  }
+  const from = Object.keys(frames).find((k) => frames[k].contentWindow === e.source) || null;
+  if (from === null || e.origin !== ENGINE || !plainObject(d) || d.v !== 1) {
+    st.stray.push({origin: e.origin, from, type: plainObject(d) ? d.type : null});
+    return;
+  }
+  st.log.push({from, type: d.type, id: d.id, re: "re" in d ? d.re : null,
+               payload: plainObject(d.payload) ? JSON.parse(JSON.stringify(d.payload)) : null});
+  if (d.type === "evora:ready" && !st.ready[from]) {
+    st.ready[from] = d.id;
+    st.caps[from] = Array.isArray(d.payload && d.payload.capabilities) ? d.payload.capabilities : [];
+  } else if (d.type === "evora:ack" && typeof d.re === "string") {
+    st.acks[d.re] = {from, ok: plainObject(d.payload) && d.payload.ok === true, payload: d.payload};
+  }
+});
+window.__evoraInit = (to, ns) => {
+  if (!st.ready[to]) return null;
+  const id = ulid();
+  frames[to].contentWindow.postMessage({v: 1, type: "evora:init", id, re: st.ready[to], payload: {
+    lang: "fr", engineLang: "fr", theme: "dark", accent: "#4F46E5", readOnly: false, storageNs: ns,
+    displayName: "Compte Evora", capabilities: st.caps[to], prefs: {},
+    limits: {maxDocumentBytes: 1048576, maxExportBytes: 1048576}}}, ENGINE);
+  return id;
+};
+window.__evoraSendTo = (to, type, payload) => {
+  const id = ulid();
+  frames[to].contentWindow.postMessage({v: 1, type, id, payload}, ENGINE);
+  return id;
+};
+window.__evoraProbe = (remove) => {
+  const id = ulid();
+  observer.contentWindow.postMessage(typeof remove === "string" ? {probe: id, remove} : {probe: id}, ENGINE);
+  return id;
+};
+"""
+
+
+def parent_page_multi(query):
+    """Page parente du scénario « pont-deux-instances » : quatre moteurs en grille, tous visibles
+    (une iframe d'une autre origine hors de la vue verrait ses images ralenties), et l'observateur."""
+    harness = MULTI_HARNESS % {"engine": ENGINE_ORIGIN, "ids": json.dumps(list(INSTANCES))}
+    engines = "".join(
+        f'<iframe id="{i}" name="evora-{i}" src="{ENGINE_ORIGIN}/index.html{query}" width="{INSTANCE_W}" '
+        f'height="{INSTANCE_H}"\n style="border:0;display:block" sandbox="allow-scripts allow-same-origin"></iframe>\n'
+        for i in INSTANCES)
+    return f"""<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Evora smoke : deux instances</title></head>
+<body style="margin:0;background:#fff">
+<div style="display:grid;grid-template-columns:repeat(2,{INSTANCE_W}px);gap:0">
+{engines}</div>
+<iframe id="observer" src="{ENGINE_ORIGIN}/__evora-observer.html" width="10" height="10" style="border:0;display:block"></iframe>
+<script>
 window.__evoraMessages = [];
 addEventListener("message", (e) => {{
   const d = e.data;
@@ -476,12 +575,15 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
     served = []
     expect = expect or {}
     host = bool(expect.get("ehp"))
+    multi = bool(expect.get("instances"))
+    no_listeners = "no-listeners" in expect.get("sabotage", "").split()
     engine = start_server(PORT_A, "127.0.0.1", directory=site, csp=csp, served=served,
                           host_config={"parentOrigins": [PARENT_ORIGIN]} if host else None)
-    parent = start_server(PORT_B, "127.0.0.1", page=parent_page(query, host), served=served)
+    body = parent_page_multi(query) if multi else parent_page(query, host)
+    parent = start_server(PORT_B, "127.0.0.1", page=body, served=served)
     # « localhost » peut se résoudre en ::1 : la page parente écoute aussi en IPv6 quand c'est possible.
     try:
-        parent6 = start_server(PORT_B, "::1", page=parent_page(query, host), served=served)
+        parent6 = start_server(PORT_B, "::1", page=body, served=served)
     except OSError:
         parent6 = None
     intruders = []
@@ -513,7 +615,9 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
                 contexts[(sess, ctx["id"])] = ctx.get("origin", "")
                 if ctx.get("origin") == ENGINE_ORIGIN:
                     # Le contexte naît au premier script du document, bien avant la fin du chargement
-                    # du .wasm : l'horodatage est posé à temps.
+                    # du .wasm : l'horodatage (et le sabordage du témoin « no-listeners ») est posé à temps.
+                    if no_listeners:
+                        chrome.send("Runtime.evaluate", {"expression": NO_LISTENERS, "contextId": ctx["id"]}, sess)
                     chrome.send("Runtime.evaluate", {"expression": TIMING, "contextId": ctx["id"]}, sess)
         elif method == "Runtime.executionContextDestroyed":
             contexts.pop((sess, params.get("executionContextId")), None)
@@ -612,7 +716,9 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
             settle_end = time.monotonic() + SETTLE
             while time.monotonic() < settle_end:
                 chrome.pump(0.1)
-            if host:
+            if multi:
+                run_instances(chrome, page, contexts, result, errors)
+            elif host:
                 run_ehp(chrome, page, (sess, ctx), contexts, result, errors, expect.get("sabotage", ""))
             gl = chrome.call("Runtime.evaluate", {"expression": GL_PROBE, "contextId": ctx, "returnByValue": True}, sess)
             result["gl"] = gl.get("result", {}).get("value")
@@ -1109,15 +1215,231 @@ def check_envelopes(st, result, errors):
         errors.append(f"[dirty] {problem}")
 
 
+# Témoin sabordé « no-listeners » (scénario « pont-deux-instances-temoin »), posé dans chaque document
+# de l'origine moteur dès la création de son contexte, bien avant le démarrage du moteur :
+# BroadcastChannel devient inerte et aucun écouteur « storage » n'est posé sur la fenêtre. Le moteur
+# n'apprend donc plus les effacements faits par ses autres pages.
+NO_LISTENERS = """(() => {
+  if (window.__evoraNoListeners) return "déjà posé";
+  window.__evoraNoListeners = true;
+  const add = EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    if (type === "storage" && this === window) return undefined;
+    return add.call(this, type, listener, options);
+  };
+  window.BroadcastChannel = class {
+    constructor(name) { this.name = String(name); }
+    postMessage() {}
+    close() {}
+    addEventListener() {}
+    removeEventListener() {}
+    dispatchEvent() { return true; }
+  };
+  return "posé";
+})()"""
+
+MULTI_STATE = "JSON.stringify(window.__evoraMulti || {})"
+
+
+def cdp_evaluate(chrome, expr, session, context=None, gesture=False):
+    params = {"expression": expr, "returnByValue": True}
+    if context is not None:
+        params["contextId"] = context
+    if gesture:
+        params["userGesture"] = True
+    r = chrome.call("Runtime.evaluate", params, session, 20)
+    if r.get("exceptionDetails"):
+        d = r["exceptionDetails"]
+        raise RuntimeError(f"évaluation : {d.get('text', '')} {describe_remote(d.get('exception', {}))}")
+    return r.get("result", {}).get("value")
+
+
+def run_instances(chrome, page, contexts, result, errors):
+    """E5 entre pages de l'origine moteur (HOST-PROTOCOL.md §7.7). eframe enregistre les réglages
+    toutes les 30 s et à chaque perte de focus, même onglet masqué : une page qui n'apprend pas un
+    effacement le dément. Trois chemins, chacun isolé par sa prémisse :
+    a) deux onglets du même compte (e1, e2) : une purge dans e1 ne doit pas être démentie par e2 ; la
+       clé n'existe pas encore, donc seule la diffusion de la purge peut l'empêcher ;
+    b) un onglet du même compte ouvert après la purge (e3), puis un autre compte (e4) qui démarre :
+       son evora:init efface les autres espaces, et e3 ne doit pas recréer le sien ; la clé de e3
+       n'existe pas encore, donc seule la diffusion de l'evora:init peut l'empêcher ;
+    c) e4 écrit sa clé (prémisse), une autre fenêtre de l'origine (l'observateur) l'efface, et e4 ne
+       doit pas la recréer : seul l'événement storage peut l'empêcher."""
+    own = NS_PREFIX + NS_OWN
+    other = NS_PREFIX + NS_OTHER
+    store = result.setdefault("instances", {})
+
+    def ev(expr, session, context=None, gesture=False):
+        return cdp_evaluate(chrome, expr, session, context, gesture)
+
+    def state():
+        return json.loads(ev(MULTI_STATE, page) or "{}")
+
+    def wait(cond, timeout=30.0):
+        end = time.monotonic() + timeout
+        st = state()
+        while not cond(st) and time.monotonic() < end:
+            chrome.pump(0.2)
+            st = state()
+        return st
+
+    def settle(seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            chrome.pump(0.1)
+
+    def engines():
+        """Contextes des moteurs (par window.name), une fois leur canvas dimensionné par eframe."""
+        found = {}
+        for (sess, ctx), origin in list(contexts.items()):
+            if origin != ENGINE_ORIGIN:
+                continue
+            try:
+                name = ev("window.name", sess, ctx)
+                probe = json.loads(ev(PROBE, sess, ctx) or "{}")
+            except (RuntimeError, TimeoutError):
+                continue
+            key = name[len("evora-"):] if isinstance(name, str) and name.startswith("evora-") else None
+            if key in INSTANCES and probe.get("canvas") and probe.get("cw", 0) > 0 and probe.get("w") != 300 \
+                    and abs(probe["w"] - round(probe["cw"] * probe.get("dpr", 1))) <= 1:
+                found[key] = (sess, ctx)
+        return found
+
+    def observe(remove=None):
+        """Clés du moteur lues par l'observateur (après avoir effacé `remove`, s'il est donné)."""
+        pid = ev(f"window.__evoraProbe({json.dumps(remove)})", page)
+        st = wait(lambda s: pid in (s.get("obs") or {}), 15)
+        seen = (st.get("obs") or {}).get(pid)
+        if seen is None:
+            errors.append("[banc] observateur muet")
+            return None
+        return seen.get("engine") or []
+
+    def acked(st, i, frm):
+        a = (st.get("acks") or {}).get(i) or {}
+        return a.get("from") == frm and a.get("ok") is True
+
+    def save(frm):
+        """Focus puis perte de focus du canvas : eframe enregistre alors l'état de l'app (App::save).
+        Sans focus pris puis perdu, aucun enregistrement : le contrôle qui suit ne pourrait pas rougir."""
+        sess, ctx = found[frm]
+        focus = ev(FOCUS, sess, ctx, gesture=True)
+        settle(0.3)
+        blur = ev(BLUR, sess, ctx, gesture=True)
+        settle(1.0)
+        if focus is not True or blur is not True:
+            errors.append(f"[banc] {frm} : focus pris {focus}, perdu {blur} (attendu : true, true) ; "
+                          "aucun enregistrement provoqué")
+        return {"focus": focus, "blur": blur}
+
+    end = time.monotonic() + READY_TIMEOUT
+    found = engines()
+    while len(found) < len(INSTANCES) and time.monotonic() < end:
+        chrome.pump(0.5)
+        found = engines()
+    store["moteurs"] = sorted(found)
+    st = wait(lambda s: all(i in (s.get("ready") or {}) for i in INSTANCES))
+    if len(found) < len(INSTANCES) or not all(i in (st.get("ready") or {}) for i in INSTANCES):
+        errors.append(f"[banc] {len(INSTANCES)} moteurs prêts attendus : canvas {sorted(found)}, evora:ready {sorted(st.get('ready') or {})}")
+        return
+    # 1. Deux onglets du même compte : evora:init avec le même storageNs ; la clé n'existe pas encore.
+    i1 = ev(f"window.__evoraInit('e1', '{NS_OWN}')", page)
+    i2 = ev(f"window.__evoraInit('e2', '{NS_OWN}')", page)
+    st = wait(lambda s: acked(s, i1, "e1") and acked(s, i2, "e2"))
+    if not (acked(st, i1, "e1") and acked(st, i2, "e2")):
+        errors.append(f"[banc] accusés d'evora:init de e1 et e2 absents ou négatifs : {st.get('acks')}")
+        return
+    settle(1.0)
+    before = observe()
+    store["avant_purge"] = before
+    if before is not None and own in before:
+        errors.append(f"[banc] {own} écrit avant la purge : le contrôle de la diffusion n'est pas isolé")
+    # 2. Déconnexion depuis e1 : evora:purge {scope: "current"}, accusé positif.
+    p1 = ev("window.__evoraSendTo('e1', 'evora:purge', {scope: 'current'})", page)
+    st = wait(lambda s: acked(s, p1, "e1"), 15)
+    if not acked(st, p1, "e1"):
+        errors.append(f"[banc] accusé d'evora:purge de e1 absent ou négatif : {(st.get('acks') or {}).get(p1)}")
+    settle(1.0)
+    # 3. e2 enregistrerait à sa perte de focus : rien ne doit reparaître.
+    store["e2_enregistrement"] = save("e2")
+    after = observe()
+    store["apres_purge_e1_puis_enregistrement_e2"] = after
+    if after is not None and own in after:
+        errors.append(f"[deux-instances-diffusion] le second onglet du compte a recréé {own} après l'accusé de purge du premier")
+    # 4. Un onglet du même compte ouvert après la purge (e3) ; l'espace du compte, effacé d'abord s'il
+    # reste (il ne reste que sur un moteur fautif), pour que la prémisse de l'étape 5 tienne.
+    observe(own)
+    i3 = ev(f"window.__evoraInit('e3', '{NS_OWN}')", page)
+    st = wait(lambda s: acked(s, i3, "e3"))
+    if not acked(st, i3, "e3"):
+        errors.append(f"[banc] accusé d'evora:init de e3 absent ou négatif : {(st.get('acks') or {}).get(i3)}")
+        return
+    settle(1.0)
+    before = observe()
+    store["avant_init_e4"] = before
+    if before is not None and own in before:
+        errors.append(f"[banc] {own} présent avant l'evora:init de e4 : le contrôle de sa diffusion n'est pas isolé")
+    # 5. Un autre compte démarre (e4) : son evora:init efface les autres espaces ; e3, qui enregistrerait
+    # à sa perte de focus, ne doit pas recréer le sien.
+    i4 = ev(f"window.__evoraInit('e4', '{NS_OTHER}')", page)
+    st = wait(lambda s: acked(s, i4, "e4"))
+    if not acked(st, i4, "e4"):
+        errors.append(f"[banc] accusé d'evora:init de e4 absent ou négatif : {(st.get('acks') or {}).get(i4)}")
+        return
+    settle(1.0)
+    store["e3_enregistrement"] = save("e3")
+    after = observe()
+    store["apres_init_e4_puis_enregistrement_e3"] = after
+    if after is not None and own in after:
+        errors.append(f"[deux-instances-compte] l'onglet du premier compte a recréé {own} après l'evora:init d'un autre compte")
+    # 6. e4 écrit sa clé (prémisse) ; une autre fenêtre de l'origine l'efface ; e4 ne doit pas la recréer.
+    store["e4_enregistrement"] = save("e4")
+    written = observe()
+    store["apres_enregistrement_e4"] = written
+    if written is not None and other not in written:
+        errors.append(f"[banc] e4 n'a pas écrit {other} : le contrôle de l'effacement ne pourrait pas rougir")
+    elif written is not None:
+        store["apres_effacement_par_une_autre_fenetre"] = observe(other)
+        settle(1.0)
+        store["e4_enregistrement_apres_effacement"] = save("e4")
+        again = observe()
+        store["apres_effacement_puis_enregistrement_e4"] = again
+        if again is not None and other in again:
+            errors.append(f"[deux-instances-stockage] e4 a recréé {other} après son effacement par une autre fenêtre de l'origine")
+    # 7. Enveloppes : un seul evora:ready par moteur ; aucun message d'une autre source.
+    st = state()
+    for i in INSTANCES:
+        n = len([m for m in st.get("log", []) if m.get("from") == i and m.get("type") == "evora:ready"])
+        if n != 1:
+            errors.append(f"[ehp] {i} : evora:ready reçu {n} fois (attendu : 1)")
+    if st.get("stray"):
+        errors.append(f"[ehp] messages d'une autre source ou hors norme : {st['stray'][:5]}")
+    store["messages"] = [{k: m.get(k) for k in ("from", "type", "payload")} for m in st.get("log", [])][-30:]
+
+
 # Témoin sabordé : les détecteurs qui doivent rougir, et eux seuls, quand removeItem est sans effet
 # dans le moteur (le moteur croit effacer, rien ne l'est) et qu'un evora:dirty part de la fenêtre du
 # moteur avant evora:open.
 WITNESS_SABOTAGE = "no-remove early-dirty"
 WITNESS_EXPECTED = {"purge-demarrage", "purge", "stockage.ns", "dirty"}
+# Témoin « pont-deux-instances-temoin » : sans diffusion ni événement storage, chacun des trois
+# contrôles du scénario 7 rougit, et eux seuls.
+INSTANCES_SABOTAGE = "no-listeners"
+INSTANCES_EXPECTED = {"deux-instances-diffusion", "deux-instances-compte", "deux-instances-stockage"}
 
 
 def error_tags(errors):
     return {m.group(1) for m in (re.match(r"^\[([^\]]+)\]", e) for e in errors) if m}
+
+
+def mark_witness(witness, expected, description):
+    """Un témoin sabordé est VALIDE s'il est rouge, et rouge par les seuls détecteurs `expected`."""
+    tags = error_tags(witness["errors"])
+    witness["sabotage_desc"] = description
+    witness["expected_red"] = sorted(expected)
+    witness["tags"] = sorted(tags)
+    witness["witness_ok"] = (not witness["ok"]) and tags == expected
+    return witness
 
 
 def main(argv):
@@ -1157,11 +1479,18 @@ def main(argv):
         # Il DOIT être rouge, par les seuls détecteurs du stockage et de doc.dirty (WITNESS_EXPECTED).
         witness = run_scenario("pont-ehp-temoin", site, engine_csp(hashes), out_dir, chrome_bin, ehp_query,
                                {"probe": "evora-smoke", "dark": True, "ehp": True, "sabotage": WITNESS_SABOTAGE})
-        tags = error_tags(witness["errors"])
-        witness["expected_red"] = sorted(WITNESS_EXPECTED)
-        witness["tags"] = sorted(tags)
-        witness["witness_ok"] = (not witness["ok"]) and tags == WITNESS_EXPECTED
-        results.append(witness)
+        results.append(mark_witness(witness, WITNESS_EXPECTED, f"{WITNESS_SABOTAGE} : removeItem sans effet dans le "
+                                    "moteur, evora:dirty glissé avant evora:open"))
+        # E5 entre pages de l'origine moteur : quatre moteurs (deux comptes) dans la même page parente.
+        instances_query = "?host=evora&evora-audit=1"
+        results.append(run_scenario("pont-deux-instances", site, engine_csp(hashes), out_dir, chrome_bin,
+                                    instances_query, {"ehp": True, "instances": True}))
+        # Son témoin : sans diffusion ni écouteur storage dans le moteur, il DOIT rougir par ses trois
+        # seuls détecteurs (INSTANCES_EXPECTED).
+        witness2 = run_scenario("pont-deux-instances-temoin", site, engine_csp(hashes), out_dir, chrome_bin,
+                                instances_query, {"ehp": True, "instances": True, "sabotage": INSTANCES_SABOTAGE})
+        results.append(mark_witness(witness2, INSTANCES_EXPECTED, f"{INSTANCES_SABOTAGE} : BroadcastChannel inerte et "
+                                    "aucun écouteur storage dans les documents moteur"))
     with open(os.path.join(out_dir, "smoke.json"), "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2, ensure_ascii=False)
 
@@ -1211,9 +1540,11 @@ def main(argv):
                 log(f"- {r['scenario']} : clés localStorage de l'origine moteur après rechargement : {r['storage_keys']}")
             if "audit" in r:
                 log(f"- {r['scenario']} : audit au rendu E9/E10 (window.__evoraAudit) : {r['audit']}")
+            if "instances" in r:
+                log(f"- {r['scenario']} : stockage entre pages de l'origine moteur (E5) : "
+                    + json.dumps({k: v for k, v in r["instances"].items() if k != "messages"}, ensure_ascii=False)[:2400])
             if "witness_ok" in r:
-                log(f"- {r['scenario']} : témoin sabordé ({WITNESS_SABOTAGE} : removeItem sans effet dans le moteur, "
-                    "evora:dirty glissé avant evora:open) ; "
+                log(f"- {r['scenario']} : témoin sabordé ({r['sabotage_desc']}) ; "
                     f"détecteurs déclenchés {r['tags']} ; attendus {r['expected_red']} ; "
                     f"{'VALIDE' if r['witness_ok'] else 'INVALIDE : le banc ne rougit pas comme il le doit'}")
             for e in r["errors"]:
