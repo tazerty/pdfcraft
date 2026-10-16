@@ -76,7 +76,7 @@ env:
 jobs:
   web:
     name: Build web (wasm32)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - name: Checkout de la branche Evora
