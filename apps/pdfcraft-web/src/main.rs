@@ -130,7 +130,11 @@ fn warn_before_unload(unsaved: std::sync::Arc<std::sync::atomic::AtomicBool>) {
 /// - `evora:init` erases, before its answer, every other namespace and every key the engine leaves
 ///   outside the namespaces on its origin ([`LOOSE`]) (§7.1 step 6, §7.7 b);
 /// - `evora:purge` first seals the gate (no write any more, for the rest of the page's life), then
-///   erases, checks that nothing is left, and only then answers (§7.7 a).
+///   erases, checks that nothing is left, and only then answers (§7.7 a);
+/// - the engine's other pages on the origin (a second editor tab of the same account, the next
+///   account's session) are told of each erasure, and stand down when it covers their namespace
+///   ([`watch`]): otherwise eframe, which saves every 30 s and on each loss of focus, even in a hidden
+///   tab, would write the erased namespace back from their memory.
 ///
 /// Nothing else erases anything: no URL parameter, no other message, not the start of the page.
 /// Outside the bridge, upstream's behaviour is unchanged.
@@ -139,18 +143,26 @@ mod storage_ns {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    use eframe::wasm_bindgen::{JsCast, JsValue, closure::Closure};
+
     /// Prefix of the namespaced keys.
     const PREFIX: &str = "evora.pdfcraft.";
     /// The keys this engine writes outside the namespaces on its origin: upstream's shared settings,
     /// the settings of the app's former name (PrintCraft), and eframe's UI memory.
     const LOOSE: [&str; 3] = ["pdfcraft", "printcraft", "egui_memory_ron"];
+    /// The channel on which the engine's pages of one origin tell each other what they erased.
+    const CHANNEL: &str = "evora.pdfcraft.erased";
 
-    /// Whether, and where, the settings may be written: shared by the bridge, which opens the gate
-    /// (`evora:init`, once the app has restored the account's settings) and seals it (`evora:purge`),
-    /// and by the app, which asks it on every save. Closed at first; sealed for good.
+    /// Whether, and where, the settings may be written: shared by the bridge, which names the
+    /// namespace (`evora:init`), opens the gate (once the app has restored the account's settings) and
+    /// seals it (`evora:purge`, or an erasure of the namespace by another page), and by the app, which
+    /// asks it on every save. Closed at first; sealed for good.
     #[derive(Default)]
     pub struct Gate {
-        key: Option<String>,
+        /// The key of this page's namespace, from `evora:init` on; kept once sealed, so that a later
+        /// erasure of it by another page is still recognised.
+        own: Option<String>,
+        open: bool,
         sealed: bool,
     }
 
@@ -159,20 +171,135 @@ mod storage_ns {
     impl Gate {
         /// The key the settings may be written under now, if any.
         pub fn key(&self) -> Option<String> {
-            if self.sealed { None } else { self.key.clone() }
+            if self.open && !self.sealed { self.own.clone() } else { None }
         }
 
-        /// Allow writing under namespace `ns`, unless a purge has sealed the gate.
-        pub fn open(&mut self, ns: &str) {
+        /// `evora:init` names this page's namespace `ns`, before the app restores its settings.
+        pub fn name(&mut self, ns: &str) {
             if !self.sealed {
-                self.key = key(ns);
+                self.own = key(ns);
+            }
+        }
+
+        /// Allow writing under the named namespace, unless a purge has sealed the gate.
+        pub fn open(&mut self) {
+            if !self.sealed && self.own.is_some() {
+                self.open = true;
             }
         }
 
         /// Stop every write, for the rest of the page's life.
         pub fn seal(&mut self) {
             self.sealed = true;
-            self.key = None;
+            self.open = false;
+        }
+    }
+
+    /// What a page erased, as told to the engine's other pages of the origin.
+    pub enum Erased<'a> {
+        /// `evora:purge {scope: "all"}`: every namespace.
+        All,
+        /// `evora:purge {scope: "current"}`: this namespace (`None`: none, only the loose keys).
+        Current(Option<&'a str>),
+        /// `evora:init`: every namespace except this one (`None`: every namespace).
+        Except(Option<&'a str>),
+    }
+
+    fn encode(erased: &Erased<'_>) -> String {
+        match erased {
+            Erased::All => "all".to_string(),
+            Erased::Current(ns) => format!("current:{}", ns.unwrap_or("")),
+            Erased::Except(ns) => format!("except:{}", ns.unwrap_or("")),
+        }
+    }
+
+    /// Whether the erasure another page told (`message`, from [`encode`]) covers the namespace key
+    /// `own`; `None` for a message of another form, which is ignored.
+    fn covers(message: &str, own: &str) -> Option<bool> {
+        let well_formed = |ns: &str| ns.is_empty() || valid(ns);
+        if message == "all" {
+            return Some(true);
+        }
+        if let Some(ns) = message.strip_prefix("current:") {
+            return well_formed(ns).then(|| key(ns).as_deref() == Some(own));
+        }
+        if let Some(ns) = message.strip_prefix("except:") {
+            return well_formed(ns).then(|| key(ns).as_deref() != Some(own));
+        }
+        None
+    }
+
+    /// Another page of the origin erased this page's namespace: no write any more, and the key erased
+    /// again if this page wrote it back meanwhile (the pages' tasks run in any order).
+    fn stand_down(gate: &SharedGate) {
+        let own = {
+            let mut g = gate.borrow_mut();
+            g.seal();
+            g.own.clone()
+        };
+        if let Some(k) = own
+            && let Some(s) = storage()
+            && s.get_item(&k).ok().flatten().is_some()
+        {
+            let _ = s.remove_item(&k);
+        }
+    }
+
+    /// Under the bridge, listen for the erasures made by the engine's other pages of this origin, and
+    /// stand down ([`stand_down`]) when one covers this page's namespace:
+    /// - told on [`CHANNEL`] (`evora:purge` or the start purge of `evora:init` there), which covers a
+    ///   namespace not written yet as well;
+    /// - seen by the browser's `storage` event: another page removed this page's key, or cleared
+    ///   localStorage (an event of sessionStorage, which the engine doesn't use, is left aside).
+    ///
+    /// Returns the channel this page tells its own erasures on ([`announce`]).
+    pub fn watch(gate: &SharedGate) -> Option<web_sys::BroadcastChannel> {
+        let window = web_sys::window()?;
+        let on_storage = {
+            let gate = gate.clone();
+            Closure::<dyn FnMut(web_sys::StorageEvent)>::new(move |event: web_sys::StorageEvent| {
+                let session = web_sys::window().and_then(|w| w.session_storage().ok().flatten());
+                if let (Some(area), Some(session)) = (event.storage_area(), session)
+                    && js_sys::Object::is(&area, &session)
+                {
+                    return;
+                }
+                let erased = match event.key() {
+                    None => true,
+                    Some(k) => event.new_value().is_none() && gate.borrow().own.as_deref() == Some(k.as_str()),
+                };
+                if erased {
+                    stand_down(&gate);
+                }
+            })
+        };
+        if window.add_event_listener_with_callback("storage", on_storage.as_ref().unchecked_ref()).is_ok() {
+            // The listener lives as long as the page.
+            on_storage.forget();
+        }
+        let channel = web_sys::BroadcastChannel::new(CHANNEL).ok()?;
+        let on_message = {
+            let gate = gate.clone();
+            Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+                let Some(message) = event.data().as_string() else { return };
+                let own = gate.borrow().own.clone();
+                if let Some(own) = own
+                    && covers(&message, &own) == Some(true)
+                {
+                    stand_down(&gate);
+                }
+            })
+        };
+        if channel.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref()).is_ok() {
+            on_message.forget();
+        }
+        Some(channel)
+    }
+
+    /// Tell the engine's other pages of the origin what this page erases.
+    pub fn announce(channel: Option<&web_sys::BroadcastChannel>, erased: &Erased<'_>) {
+        if let Some(c) = channel {
+            let _ = c.post_message(&JsValue::from_str(&encode(erased)));
         }
     }
 
@@ -577,9 +704,10 @@ mod ehp {
     /// What the host asks of the app, applied at the start of the next frame (`EvoraApp::logic`).
     pub enum HostEvent {
         /// `evora:init`: the account's saved settings (read before the other namespaces were
-        /// erased), the namespace the settings may then be written under (`None`: memory only), the
-        /// language (`None`: English), the theme and the author name.
-        Init { settings: Option<String>, storage_ns: Option<String>, lang: Option<&'static str>, dark: bool, author: Option<String> },
+        /// erased), whether the settings may then be written under the namespace the bridge named in
+        /// the gate (`false`: memory only), the language (`None`: English), the theme and the author
+        /// name.
+        Init { settings: Option<String>, writable: bool, lang: Option<&'static str>, dark: bool, author: Option<String> },
         Lang(Option<&'static str>),
         Theme(bool),
     }
@@ -594,6 +722,8 @@ mod ehp {
         events: Events,
         /// E5: whether, and where, the app may write its settings (`storage_ns::Gate`).
         gate: crate::storage_ns::SharedGate,
+        /// E5: where this page tells the engine's other pages of the origin what it erases.
+        channel: Option<web_sys::BroadcastChannel>,
         ready_id: String,
         initialized: bool,
         caps: Vec<String>,
@@ -675,6 +805,8 @@ mod ehp {
     pub fn connect(link: Link, inbox: pdfcraft_ui_egui::Inbox, events: Events, gate: crate::storage_ns::SharedGate, ctx: egui::Context) {
         wasm_bindgen_futures::spawn_local(async move {
             let Some((window, parent, origin)) = admitted_parent().await else { return };
+            // E5: the erasures of the engine's other pages of the origin seal this page's gate.
+            let channel = crate::storage_ns::watch(&gate);
             let state = Rc::new(RefCell::new(State {
                 parent,
                 origin,
@@ -682,6 +814,7 @@ mod ehp {
                 inbox,
                 events,
                 gate,
+                channel,
                 ready_id: String::new(),
                 initialized: false,
                 caps: Vec::new(),
@@ -902,14 +1035,19 @@ mod ehp {
         let lang = engine_lang.and_then(|l| crate::evora_lang(&l));
         // E5 (§7.1 step 6, §7.7 b), before the answer: this account's settings are read (only with
         // `storage.ns`; otherwise the engine keeps nothing), then every other namespace and every
-        // key the engine leaves outside the namespaces is erased and the erasure checked. The app
-        // restores the settings on its next frame and may only then write them, under this
-        // namespace, and only if the erasure was effective; otherwise it stays in memory.
+        // key the engine leaves outside the namespaces is erased and the erasure checked; the
+        // engine's other pages of the origin are told, so that those of another namespace stop
+        // writing it. The app restores the settings on its next frame and may only then write them,
+        // under this namespace, and only if the erasure was effective; otherwise it stays in memory.
         st.storage_ns = st.caps.iter().any(|c| c == "storage.ns").then_some(ns);
         let settings = st.storage_ns.as_deref().and_then(crate::storage_ns::read);
+        crate::storage_ns::announce(st.channel.as_ref(), &crate::storage_ns::Erased::Except(st.storage_ns.as_deref()));
         let erased = crate::storage_ns::purge_except(st.storage_ns.as_deref());
-        let storage_ns = st.storage_ns.clone().filter(|_| erased);
-        st.events.borrow_mut().push(HostEvent::Init { settings, storage_ns, lang, dark, author });
+        let writable = erased && st.storage_ns.is_some();
+        if writable && let Some(ns) = st.storage_ns.as_deref() {
+            st.gate.borrow_mut().name(ns);
+        }
+        st.events.borrow_mut().push(HostEvent::Init { settings, writable, lang, dark, author });
         ack(&st, id, true, None);
         st.ctx.request_repaint();
     }
@@ -1023,7 +1161,11 @@ mod ehp {
         // no later save, on a frame or on a focus change, can bring a key back), then the storage is
         // erased and checked. The answer comes only after an effective erasure; otherwise it is
         // negative ("forbidden": the browser storage could not be reached or kept a key).
+        // The engine's other pages of the origin are told too: those of the erased namespaces stop
+        // writing them, and erase them again if they wrote them back meanwhile.
         st.gate.borrow_mut().seal();
+        let told = if all { crate::storage_ns::Erased::All } else { crate::storage_ns::Erased::Current(st.storage_ns.as_deref()) };
+        crate::storage_ns::announce(st.channel.as_ref(), &told);
         let erased = if all { crate::storage_ns::purge_all() } else { crate::storage_ns::purge_current(st.storage_ns.as_deref()) };
         st.storage_ns = None;
         if erased {
@@ -1162,7 +1304,7 @@ impl EvoraApp {
         let events: Vec<ehp::HostEvent> = std::mem::take(&mut *self.events.borrow_mut());
         for event in events {
             match event {
-                ehp::HostEvent::Init { settings, storage_ns, lang, dark, author } => {
+                ehp::HostEvent::Init { settings, writable, lang, dark, author } => {
                     // E5: this account's settings first, then the host's language, theme and author
                     // on top; only then may the settings be written, under this account's namespace
                     // (unless a purge has sealed the gate meanwhile).
@@ -1174,8 +1316,10 @@ impl EvoraApp {
                     if let Some(author) = author {
                         self.inner.comment_prefs.author = author;
                     }
-                    if let (Some(gate), Some(ns)) = (&self.gate, storage_ns) {
-                        gate.borrow_mut().open(&ns);
+                    if let Some(gate) = &self.gate
+                        && writable
+                    {
+                        gate.borrow_mut().open();
                     }
                 }
                 ehp::HostEvent::Lang(lang) => self.inner.language = lang.unwrap_or("en").to_string(),
