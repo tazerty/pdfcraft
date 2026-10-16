@@ -25,7 +25,9 @@
 # puis {dirty: false} pour le document ouvert) et E5 (stockage par storageNs, purge au démarrage et
 # sur evora:purge, accusé après effacement, écritures arrêtées ; hors pont, amont inchangé), avec un
 # témoin sabordé (removeItem sans effet dans le moteur, evora:dirty glissé avant evora:open) qui doit
-# rougir.
+# rougir. E5 entre pages de l'origine moteur : trois moteurs du même compte dans une même page, une
+# purge dans l'un n'est démentie par aucun autre (diffusion, événement storage), avec son témoin
+# sabordé (BroadcastChannel inerte, aucun écouteur storage) qui doit rougir.
 #
 # Sortie : artefact de run evora-colophon-atelier-web-<tag> (archive .zip avec .br/.gz, LICENSES/
 # et csp-hashes.txt ; SHA256SUMS ; BUILD-INFO.txt ; csp-hashes.txt) et artefact evora-smoke-<tag>.
