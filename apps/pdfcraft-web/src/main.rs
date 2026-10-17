@@ -52,18 +52,30 @@ fn main() {
                     // documents come from the host page only (EHP, HOST-PROTOCOL.md §2.4, §5.4).
                     // eframe never raises a close request on a browser reload or tab close, so `guard_quit` never
                     // prompts; ask the browser to confirm instead while a document has unsaved work (#812).
-                    warn_before_unload(app.unsaved_flag.clone());
+                    // Evora (COL-09): not under the Evora bridge, where the host page owns that prompt.
+                    if !evora_host {
+                        warn_before_unload(app.unsaved_flag.clone());
+                    }
                     // Evora (E4, COL-02): `?host=evora` speaks the Evora host protocol (EHP v1) with the
                     // parent origin that `evora-host.json` admits (module `ehp` below).
                     let events = ehp::Events::default();
+                    let probe = ehp::Probe::default();
                     let mut gate = None;
+                    let mut bridge_link = None;
                     if evora_host {
                         let shared = storage_ns::SharedGate::default();
                         let link = ehp::Link::default();
-                        app.host_save = Some(link.save_fn());
+                        // COL-08, COL-09: saves wait for `evora:saved` when `doc.saved-ack` is effective.
+                        app.host_save_ack = Some(link.save_fn());
                         app.host_dirty = Some(link.dirty_fn());
-                        ehp::connect(link, app.startup_inbox.clone(), events.clone(), shared.clone(), cc.egui_ctx.clone());
+                        let outcomes = app.host_save_outcomes.clone();
+                        ehp::connect(link.clone(), app.startup_inbox.clone(), outcomes, events.clone(), shared.clone(), cc.egui_ctx.clone());
+                        // CI only (`?evora-audit=1`): the smoke test edits the document (`window.__evoraRun`).
+                        if query_param("evora-audit").as_deref() == Some("1") {
+                            ehp::install_probe(probe.clone(), cc.egui_ctx.clone());
+                        }
                         gate = Some(shared);
+                        bridge_link = Some(link);
                     }
                     // `?host=parent`: a same-origin page embedding PdfCraft in an iframe (such
                     // as the Nextcloud app) passes files in and takes saves back (`host` below).
@@ -86,7 +98,7 @@ fn main() {
                             &"PdfCraft: ?host=parent needs a framing page on the same origin; saves download instead".into(),
                         );
                     }
-                    Ok(Box::new(EvoraApp { inner: app, events, gate }))
+                    Ok(Box::new(EvoraApp { inner: app, events, gate, link: bridge_link, probe }))
                 }),
             )
             .await;
@@ -670,11 +682,13 @@ mod e10 {
 /// binary sizes, correlation); anything else is ignored. Outgoing messages always name the parent
 /// origin as `targetOrigin`, never `*`.
 ///
-/// Handled: `evora:init`, `evora:open` (bytes), `evora:saved` (checked; without the `doc.saved-ack`
-/// capability the engine does not act on it, so the host keeps its own save state, §6.3),
-/// `evora:lang`, `evora:theme`, `evora:purge`. Sent: `evora:ready`, `evora:failed`, `evora:ack`,
-/// `evora:dirty` (only once the host has opened a document, and again after each `evora:open`),
-/// `evora:save`.
+/// Handled: `evora:init`, `evora:open` (bytes; the same `docRef` again replaces the document),
+/// `evora:request-save` (COL-08: `evora:save` with `re`, or `evora:ack` `clean`), `evora:saved`
+/// (COL-09, with `doc.saved-ack` effective: the document counts as saved only on `ok: true` and only
+/// if unchanged since, and the engine then tells its state again, l.480; without it, upstream's
+/// behaviour and the host's own save state, §6.3), `evora:lang`, `evora:theme`, `evora:purge`.
+/// Sent: `evora:ready`, `evora:failed`, `evora:ack`, `evora:dirty` (only once the host has opened a
+/// document, and again after each `evora:open` and each successful `evora:saved`), `evora:save`.
 #[cfg(target_arch = "wasm32")]
 mod ehp {
     use std::cell::RefCell;
@@ -685,9 +699,42 @@ mod ehp {
     /// Build slug and protocol version announced in `evora:ready` (§4.4, §10).
     const APP: &str = "colophon-atelier";
     const EHP: &str = "1.0";
-    /// What this engine honours (§9.1). Not yet: `doc.saved-ack`, `doc.request-save`,
-    /// `export.drive` (patches COL-09, COL-08, COL-03).
-    const CAPABILITIES: [&str; 8] = ["doc.open", "doc.save", "doc.dirty", "live.lang", "live.theme", "storage.ns", "storage.purge", "author"];
+    /// What this engine honours (§9.1). Not yet: `export.drive` (patch COL-03).
+    const CAPABILITIES: [&str; 10] = [
+        "doc.open",
+        "doc.save",
+        "doc.saved-ack",
+        "doc.dirty",
+        "doc.request-save",
+        "live.lang",
+        "live.theme",
+        "storage.ns",
+        "storage.purge",
+        "author",
+    ];
+    /// `ackCode` (§3): the `error` an unsuccessful `evora:saved` may carry.
+    const ACK_CODES: [&str; 16] = [
+        "clean",
+        "cancelled",
+        "conflict",
+        "too_large",
+        "quota",
+        "forbidden",
+        "not_found",
+        "invalid_content",
+        "unsupported",
+        "rate_limited",
+        "read_only",
+        "busy",
+        "capability",
+        "network",
+        "server",
+        "timeout",
+    ];
+    /// `evora:request-save` reasons (§4.3).
+    const SAVE_REASONS: [&str; 5] = ["autosave", "visibility", "close", "logout", "user"];
+    /// CI only: what the smoke test may run in the engine (`window.__evoraRun`, [`install_probe`]).
+    const PROBE_COMMANDS: [&str; 1] = ["page.rotate"];
     /// The admitted parent origins, beside `index.html` (§2.3).
     const CONFIG: &str = "evora-host.json";
     const LANGS: [&str; 14] = ["ar", "de", "en", "es", "fr", "hi", "id", "it", "ja", "ko", "pt", "ru", "tr", "zh-Hans"];
@@ -721,9 +768,26 @@ mod ehp {
         Init { settings: Option<String>, writable: bool, lang: Option<&'static str>, dark: bool, author: Option<String> },
         Lang(Option<&'static str>),
         Theme(bool),
+        /// COL-08: `evora:request-save` `re` for the document named `name`.
+        RequestSave { re: String, name: String },
+        /// S-ACK-6: the host opens again a document it already opened ("reload the server's
+        /// version"): close the tab showing `name`, unsaved work included, before the new bytes open.
+        Replace(String),
     }
 
     pub type Events = Rc<RefCell<Vec<HostEvent>>>;
+
+    /// CI only: commands queued by the smoke test (`window.__evoraRun`), run on the next frame.
+    pub type Probe = Rc<RefCell<Vec<String>>>;
+
+    /// An `evora:save` sent and not answered yet: its `id`, the app's ticket, the document's name, and
+    /// whether `doc.saved-ack` was effective (the app then waits for the answer).
+    struct PendingSave {
+        id: String,
+        ticket: u64,
+        name: String,
+        acked: bool,
+    }
 
     struct State {
         parent: web_sys::Window,
@@ -742,7 +806,14 @@ mod ehp {
         storage_ns: Option<String>,
         /// `(name, docRef)` of the documents the host opened, to tell which one a save is.
         docs: Vec<(String, String)>,
-        pending_saves: Vec<String>,
+        pending_saves: Vec<PendingSave>,
+        /// COL-09: where the app reads the outcome of each acknowledged save (by ticket).
+        outcomes: pdfcraft_ui_egui::HostSaveOutcomes,
+        next_ticket: u64,
+        /// COL-08: the `evora:request-save` the next `evora:save` answers (its `re`), and why that
+        /// save could not go out, if it couldn't.
+        request: Option<String>,
+        request_failure: Option<&'static str>,
         /// The modified state last told to the host; `None` again after each `evora:open`, so that
         /// the state of the newly opened document follows its answer (§7.1 step 8).
         last_dirty: Option<bool>,
@@ -757,8 +828,11 @@ mod ehp {
             self.0.borrow().clone()
         }
 
-        /// `evora:save` for the app's Save and Save As (`HostSaveFn`).
-        pub fn save_fn(&self) -> pdfcraft_ui_egui::HostSaveFn {
+        /// `evora:save` for the app's Save and Save As (`HostSaveAckFn`), with `re` when it answers
+        /// the host's `evora:request-save` (COL-08). With `doc.saved-ack` effective (COL-09) the app
+        /// gets a ticket and the document stays modified until `evora:saved`; otherwise the app
+        /// counts it saved once handed over, as upstream does.
+        pub fn save_fn(&self) -> pdfcraft_ui_egui::HostSaveAckFn {
             let link = self.clone();
             Box::new(move |name: &str, bytes: &[u8], save_as: bool| {
                 let state = link.state().ok_or_else(|| "Evora is not connected yet".to_string())?;
@@ -766,12 +840,18 @@ mod ehp {
                 if !st.initialized || !st.caps.iter().any(|c| c == "doc.save") {
                     return Err("Evora is not ready to save yet".into());
                 }
-                let refs: Vec<&String> = st.docs.iter().filter(|(n, _)| n == name).map(|(_, r)| r).collect();
-                let [doc_ref] = refs.as_slice() else {
+                let found: Vec<String> = st.docs.iter().filter(|(n, _)| n == name).map(|(_, r)| r.clone()).collect();
+                let [doc_ref] = found.as_slice() else {
+                    st.request_failure = Some("not_found");
                     return Err("only a document opened from Evora can be saved here".into());
                 };
-                let doc_ref = (*doc_ref).clone();
-                if bytes.is_empty() || bytes.len() as f64 > st.max_document {
+                let doc_ref = doc_ref.clone();
+                if bytes.is_empty() {
+                    st.request_failure = Some("invalid_content");
+                    return Err("the document is empty".into());
+                }
+                if bytes.len() as f64 > st.max_document {
+                    st.request_failure = Some("too_large");
                     return Err("the document is too large to save in Evora".into());
                 }
                 let buffer = js_sys::Uint8Array::from(bytes).buffer();
@@ -782,10 +862,41 @@ mod ehp {
                     ("bytes", buffer.clone().into()),
                 ])
                 .ok_or_else(|| "couldn't build the message".to_string())?;
-                let id = send(&st, "evora:save", None, &payload, Some(&buffer)).ok_or_else(|| "couldn't send the document".to_string())?;
-                st.pending_saves.push(id);
-                Ok(())
+                // COL-08: the answer to the host's `evora:request-save`, when this save is one.
+                let re = st.request.clone();
+                let id = send(&st, "evora:save", re.as_deref(), &payload, Some(&buffer)).ok_or_else(|| "couldn't send the document".to_string())?;
+                st.request = None;
+                let acked = st.caps.iter().any(|c| c == "doc.saved-ack");
+                st.next_ticket += 1;
+                let ticket = st.next_ticket;
+                st.pending_saves.push(PendingSave { id, ticket, name: name.to_string(), acked });
+                Ok(acked.then_some(ticket))
             })
+        }
+
+        /// COL-08: answer the host's `evora:request-save` `re` with `evora:ack`.
+        pub fn answer(&self, re: &str, ok: bool, code: &str) {
+            if let Some(state) = self.state() {
+                ack(&state.borrow(), re, ok, Some(code));
+            }
+        }
+
+        /// COL-08: the next `evora:save` answers the host's `evora:request-save` `re`.
+        pub fn arm_request(&self, re: &str) {
+            if let Some(state) = self.state() {
+                let mut st = state.borrow_mut();
+                st.request = Some(re.to_string());
+                st.request_failure = None;
+            }
+        }
+
+        /// COL-08, after the app's save: `None` if the `evora:save` answering the request went out,
+        /// otherwise the code to answer it with. The request is dropped either way.
+        pub fn disarm_request(&self) -> Option<&'static str> {
+            let state = self.state()?;
+            let mut st = state.borrow_mut();
+            let failure = st.request_failure.take();
+            st.request.take().map(|_| failure.unwrap_or("busy"))
         }
 
         /// `evora:dirty` when unsaved work appears or goes away (`HostDirtyFn`, told every frame).
@@ -812,8 +923,33 @@ mod ehp {
         }
     }
 
+    /// CI only (`?host=evora&evora-audit=1`): `window.__evoraRun("page.rotate")` queues one of
+    /// [`PROBE_COMMANDS`] for the next frame and returns whether it did. That is how the smoke test
+    /// edits the open document (S-ACK scenarios) without driving the menus.
+    pub fn install_probe(probe: Probe, ctx: egui::Context) {
+        let Some(window) = web_sys::window() else { return };
+        let run = Closure::<dyn Fn(JsValue) -> bool>::new(move |command: JsValue| {
+            let Some(command) = command.as_string().filter(|c| PROBE_COMMANDS.contains(&c.as_str())) else {
+                return false;
+            };
+            probe.borrow_mut().push(command);
+            ctx.request_repaint();
+            true
+        });
+        if js_sys::Reflect::set(&window, &JsValue::from_str("__evoraRun"), run.as_ref()).is_ok() {
+            run.forget();
+        }
+    }
+
     /// Read `evora-host.json`, find the admitted parent, listen, and announce `evora:ready`.
-    pub fn connect(link: Link, inbox: pdfcraft_ui_egui::Inbox, events: Events, gate: crate::storage_ns::SharedGate, ctx: egui::Context) {
+    pub fn connect(
+        link: Link,
+        inbox: pdfcraft_ui_egui::Inbox,
+        outcomes: pdfcraft_ui_egui::HostSaveOutcomes,
+        events: Events,
+        gate: crate::storage_ns::SharedGate,
+        ctx: egui::Context,
+    ) {
         wasm_bindgen_futures::spawn_local(async move {
             let Some((window, parent, origin)) = admitted_parent().await else { return };
             // E5: the erasures of the engine's other pages of the origin seal this page's gate.
@@ -833,6 +969,10 @@ mod ehp {
                 storage_ns: None,
                 docs: Vec::new(),
                 pending_saves: Vec::new(),
+                outcomes,
+                next_ticket: 0,
+                request: None,
+                request_failure: None,
                 last_dirty: None,
             }));
             let listener = state.clone();
@@ -947,6 +1087,7 @@ mod ehp {
         let capability = match kind.as_str() {
             "evora:init" => None,
             "evora:open" => Some("doc.open"),
+            "evora:request-save" => Some("doc.request-save"),
             "evora:saved" => Some("doc.save"),
             "evora:lang" => Some("live.lang"),
             "evora:theme" => Some("live.theme"),
@@ -980,6 +1121,7 @@ mod ehp {
         match kind.as_str() {
             "evora:init" => on_init(state, &id, re.as_deref(), &payload),
             "evora:open" => on_open(state, &id, &payload),
+            "evora:request-save" => on_request_save(state, &id, &payload),
             "evora:saved" => on_saved(state, re.as_deref(), &payload),
             "evora:lang" => on_lang(state, &id, &payload),
             "evora:theme" => on_theme(state, &id, &payload),
@@ -1103,6 +1245,12 @@ mod ehp {
             ack(&st, id, false, Some("busy"));
             return;
         }
+        // S-ACK-6: the same `docRef` again ("reload the server's version", after a conflict)
+        // replaces the document the host opened: its tab closes first, unsaved work included.
+        if let Some((old, _)) = st.docs.iter().find(|(_, r)| *r == doc_ref) {
+            let old = old.clone();
+            st.events.borrow_mut().push(HostEvent::Replace(old));
+        }
         st.docs.retain(|(n, _)| n != &name);
         st.docs.push((name, doc_ref));
         // §7.1 step 8: `evora:ack`, then `evora:dirty` for the opened document, on the next frame.
@@ -1111,15 +1259,90 @@ mod ehp {
         st.ctx.request_repaint();
     }
 
+    /// COL-08: the host asks to save (`evora:request-save`, §4.3). The app answers on its next frame
+    /// (`EvoraApp::request_save`): `evora:save` with `re`, or `evora:ack {ok: true, code: "clean"}`.
+    fn on_request_save(state: &Rc<RefCell<State>>, id: &str, p: &JsValue) {
+        let st = state.borrow();
+        if !only_keys(p, &["reason", "docRef"]) || !get(p, "reason").as_string().is_some_and(|r| SAVE_REASONS.contains(&r.as_str())) {
+            return;
+        }
+        let doc_ref = get(p, "docRef");
+        let doc_ref = if doc_ref.is_undefined() {
+            None
+        } else {
+            match doc_ref.as_string().filter(|r| is_ulid(r)) {
+                Some(r) => Some(r),
+                None => return,
+            }
+        };
+        // Without `doc.multi`, a request without `docRef` is for the one document the host opened.
+        let name = match &doc_ref {
+            Some(r) => st.docs.iter().find(|(_, d)| d == r).map(|(n, _)| n.clone()),
+            None => match st.docs.as_slice() {
+                [(n, _)] => Some(n.clone()),
+                _ => None,
+            },
+        };
+        let Some(name) = name else {
+            ack(&st, id, false, Some("not_found"));
+            return;
+        };
+        st.events.borrow_mut().push(HostEvent::RequestSave { re: id.to_string(), name });
+        st.ctx.request_repaint();
+    }
+
+    /// `evora:saved` (§4.5), the answer to one of this engine's `evora:save`. With `doc.saved-ack`
+    /// effective (COL-09) its outcome goes to the app, which counts the document saved only on
+    /// `ok: true` and only if it hasn't changed since; then the engine tells its state again.
     fn on_saved(state: &Rc<RefCell<State>>, re: Option<&str>, p: &JsValue) {
         let mut st = state.borrow_mut();
         let Some(re) = re else { return };
-        if !st.pending_saves.iter().any(|s| s == re) || !only_keys(p, &["ok", "version", "docRef", "error"]) || get(p, "ok").as_bool().is_none() {
+        let Some(at) = st.pending_saves.iter().position(|s| s.id == re) else { return };
+        if !only_keys(p, &["ok", "version", "docRef", "error"]) {
             return;
         }
-        st.pending_saves.retain(|s| s != re);
-        // Without `doc.saved-ack` (patch COL-09) the engine keeps upstream's behaviour: it counts
-        // a document as saved once handed over, and the host shows its own save state (§6.3).
+        let Some(ok) = get(p, "ok").as_bool() else { return };
+        let doc_ref = get(p, "docRef");
+        let doc_ref = if doc_ref.is_undefined() {
+            None
+        } else {
+            match doc_ref.as_string().filter(|r| is_ulid(r)) {
+                Some(r) => Some(r),
+                None => return,
+            }
+        };
+        // Success carries `version` and no `error`; failure carries `error`, no `version`, no `docRef`.
+        let well_formed = if ok {
+            get(p, "version").as_f64().is_some_and(|v| v >= 1.0 && v.fract() == 0.0) && get(p, "error").is_undefined()
+        } else {
+            get(p, "error").as_string().is_some_and(|e| ACK_CODES.contains(&e.as_str()))
+                && get(p, "version").is_undefined()
+                && doc_ref.is_none()
+        };
+        if !well_formed {
+            return;
+        }
+        let save = st.pending_saves.remove(at);
+        // Without `doc.saved-ack` the engine keeps upstream's behaviour: it counted the document
+        // saved once handed over, and the host shows its own save state (§6.3).
+        if !save.acked {
+            return;
+        }
+        // §7.3: a Save As answered with the new document's `docRef`; the engine adopts it.
+        if let Some(doc_ref) = doc_ref
+            && let Some(entry) = st.docs.iter_mut().find(|(n, _)| *n == save.name)
+        {
+            entry.1 = doc_ref;
+        }
+        if let Ok(mut outcomes) = st.outcomes.lock() {
+            outcomes.push((save.ticket, ok));
+        }
+        // l.480: once the app has applied the answer (next frame), the engine tells its state again,
+        // `dirty: true` included when the document changed while the save was on its way.
+        if ok {
+            st.last_dirty = None;
+        }
+        st.ctx.request_repaint();
     }
 
     fn on_lang(state: &Rc<RefCell<State>>, id: &str, p: &JsValue) {
@@ -1307,6 +1530,10 @@ struct EvoraApp {
     /// E5: `Some` under the Evora bridge (`?host=evora`): whether, and where, the settings may be
     /// written. `None` outside the bridge, where upstream's saving is unchanged.
     gate: Option<storage_ns::SharedGate>,
+    /// COL-08: the bridge, to answer the host's `evora:request-save` (`None` outside the bridge).
+    link: Option<ehp::Link>,
+    /// CI only: commands queued by the smoke test (`window.__evoraRun`, `?evora-audit=1`).
+    probe: ehp::Probe,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1335,7 +1562,37 @@ impl EvoraApp {
                 }
                 ehp::HostEvent::Lang(lang) => self.inner.language = lang.unwrap_or("en").to_string(),
                 ehp::HostEvent::Theme(dark) => self.set_dark(dark),
+                ehp::HostEvent::RequestSave { re, name } => self.request_save(&re, &name),
+                ehp::HostEvent::Replace(name) => {
+                    while let Some(index) = self.index_of(&name) {
+                        self.inner.close_tab(index);
+                    }
+                }
             }
+        }
+    }
+
+    /// The tab showing the document named `name`, if any.
+    fn index_of(&self, name: &str) -> Option<usize> {
+        self.inner.views.iter().position(|v| self.inner.session.get(v.id).is_some_and(|d| d.name == name))
+    }
+
+    /// COL-08: the host's `evora:request-save` `re`, for the document named `name`: `evora:save`
+    /// with `re` when it has unsaved work, `evora:ack {ok: true, code: "clean"}` otherwise.
+    fn request_save(&mut self, re: &str, name: &str) {
+        let Some(link) = self.link.clone() else { return };
+        let Some(index) = self.index_of(name) else {
+            link.answer(re, false, "not_found");
+            return;
+        };
+        if !self.inner.has_unsaved_work(index) {
+            link.answer(re, true, "clean");
+            return;
+        }
+        link.arm_request(re);
+        let _ = self.inner.save_view(index, pdfcraft_ui_egui::SaveTarget::InPlace);
+        if let Some(code) = link.disarm_request() {
+            link.answer(re, false, code);
         }
     }
 
@@ -1374,6 +1631,11 @@ impl eframe::App for EvoraApp {
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.apply_host_events();
+        // CI only (`window.__evoraRun`, `?evora-audit=1`): the smoke test's edits.
+        let commands: Vec<String> = std::mem::take(&mut *self.probe.borrow_mut());
+        for command in commands {
+            let _ = self.inner.execute(&command);
+        }
         eframe::App::logic(&mut self.inner, ctx, frame);
     }
 
