@@ -152,21 +152,61 @@ def scan_catalogs(repo):
     return hits
 
 
-def scan_sources(repo):
-    """{(fichier, caractère): occurrences} dans le code d'interface, commentaires exclus."""
+CFG_TEST = re.compile(r"^(\s*)#\[cfg\(test\)\]\s*$")
+MOD_OPEN = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{\s*$")
+
+
+def test_module_lines(lines):
+    """Index des lignes d'un module `#[cfg(test)] mod … {`, jamais compilé dans le build web.
+
+    Format rustfmt (vérifié par la CI amont) : l'attribut, la ligne `mod nom {` au même retrait,
+    puis une accolade fermante seule au même retrait. Un module dont la fermeture n'est pas trouvée
+    n'est PAS exclu : la porte reste fermée par défaut.
+    """
+    skip = set()
+    i = 0
+    while i < len(lines):
+        m = CFG_TEST.match(lines[i])
+        if m:
+            j = i + 1
+            while j < len(lines) and lines[j].strip().startswith("#["):
+                j += 1
+            o = MOD_OPEN.match(lines[j]) if j < len(lines) else None
+            if o and o.group(1) == m.group(1):
+                close = o.group(1) + "}"
+                k = j + 1
+                while k < len(lines) and lines[k].rstrip("\n") != close:
+                    k += 1
+                if k < len(lines):
+                    skip.update(range(i, k + 1))
+                    i = k + 1
+                    continue
+        i += 1
+    return skip
+
+
+def scan_sources(repo, ignored=None):
+    """{(fichier, caractère): occurrences} dans le code d'interface, commentaires exclus.
+
+    Le code des modules `#[cfg(test)]` n'est pas affiché : ses occurrences vont dans `ignored`
+    (comptées et publiées à part), jamais dans le résultat.
+    """
     hits = {}
     for d in UI_SOURCE_DIRS:
         for path in walk_files(os.path.join(repo, d)):
             if not path.endswith((".rs", ".html")):
                 continue
             with open(path, encoding="utf-8") as fh:
-                for line in fh:
-                    if line.lstrip().startswith("//"):
-                        continue
-                    for ch in line:
-                        if is_emoji_like(ord(ch)):
-                            key = (rel(path, repo), ch)
-                            hits[key] = hits.get(key, 0) + 1
+                lines = fh.readlines()
+            skip = test_module_lines(lines) if path.endswith(".rs") else set()
+            for n, line in enumerate(lines):
+                if line.lstrip().startswith("//"):
+                    continue
+                for ch in line:
+                    if is_emoji_like(ord(ch)):
+                        key = (rel(path, repo), ch)
+                        target = ignored if (n in skip and ignored is not None) else hits
+                        target[key] = target.get(key, 0) + 1
     return hits
 
 
@@ -189,7 +229,8 @@ def check_emoji(repo, report):
     log(report, "### Porte des émojis des catalogues affichés (E10, bloquante)")
     log(report)
     hits = scan_catalogs(repo)
-    hits.update(scan_sources(repo))
+    ignored = {}
+    hits.update(scan_sources(repo, ignored))
     baseline = read_baseline(repo)
     total = sum(hits.values())
     over = []
@@ -207,7 +248,12 @@ def check_emoji(repo, report):
     if baseline:
         log(report, "La ligne de base ne fait que geler l'existant avant le patch E10 ; elle ne peut que décroître.")
     log(report)
-    print(f"::notice::émojis des catalogues : {total} occurrence(s), ligne de base {sum(baseline.values())}, dépassements {len(over)}")
+    log(report, f"Code de test (`#[cfg(test)]`, hors build web), compté à part : **{sum(ignored.values())}**")
+    for (f, ch), n in sorted(ignored.items()):
+        log(report, f"- `{f}` : U+{ord(ch):04X} {unicodedata.name(ch, '?')} × {n}")
+    log(report)
+    print(f"::notice::émojis des catalogues : {total} occurrence(s), ligne de base {sum(baseline.values())}, "
+          f"dépassements {len(over)} ; code de test ignoré : {sum(ignored.values())}")
     for f, ch, n, allowed in over:
         print(f"::error file={f}::U+{ord(ch):04X} {unicodedata.name(ch, '?')} : {n} occurrence(s), {allowed} permise(s)")
     return not over
