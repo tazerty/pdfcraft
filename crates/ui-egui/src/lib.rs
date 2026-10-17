@@ -396,6 +396,27 @@ pub type HostSaveFn = Box<dyn Fn(&str, &[u8], bool) -> Result<(), String>>;
 /// Told every frame whether any tab has unsaved work, so a host page can warn before leaving.
 pub type HostDirtyFn = Box<dyn FnMut(bool)>;
 
+/// Evora (EVORA-COL-24, COL-09): hands a saved PDF to a host page that acknowledges saves (the
+/// Evora host protocol's `evora:saved`): `(name, bytes, save_as)`. `Ok(Some(ticket))`: the host
+/// reports the outcome later under `ticket` through [`HostSaveOutcomes`], and the document stays
+/// modified until it reports success; `Ok(None)`: this host doesn't acknowledge, and the document
+/// counts as saved once handed over, as with [`HostSaveFn`]. Takes precedence over `host_save`.
+pub type HostSaveAckFn = Box<dyn Fn(&str, &[u8], bool) -> Result<Option<u64>, String>>;
+
+/// Evora (COL-09): outcomes of acknowledged saves, `(ticket, ok)`, applied on the next frame.
+pub type HostSaveOutcomes = std::sync::Arc<std::sync::Mutex<Vec<(u64, bool)>>>;
+
+/// Evora (COL-09): a save handed to a host that acknowledges saves, until its outcome arrives: the
+/// bytes sent and the document's edit generation when they were taken.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+struct PendingHostSave {
+    ticket: u64,
+    id: DocId,
+    bytes: std::sync::Arc<Vec<u8>>,
+    generation: u64,
+    after: Box<dyn FnOnce(&mut PdfCraftApp) + Send>,
+}
+
 pub struct PasswordPrompt {
     pub name: String,
     pub path: Option<String>,
@@ -604,6 +625,12 @@ pub struct PdfCraftApp {
     pub host_save: Option<HostSaveFn>,
     /// Reports unsaved work to the embedding page (web, see [`HostDirtyFn`]).
     pub host_dirty: Option<HostDirtyFn>,
+    /// Evora (COL-09): saves go to a host page that acknowledges them (web, see [`HostSaveAckFn`]).
+    pub host_save_ack: Option<HostSaveAckFn>,
+    /// Evora (COL-09): where that host reports the outcome of each acknowledged save.
+    pub host_save_outcomes: HostSaveOutcomes,
+    /// Evora (COL-09): acknowledged saves still waiting for their outcome.
+    pending_host_saves: Vec<PendingHostSave>,
     /// A pending "save changes?" question (closing a dirty tab or quitting).
     pub close_request: Option<CloseRequest>,
     /// Save to this path instead of asking (tests and automation).
@@ -937,6 +964,9 @@ impl PdfCraftApp {
             os_events: None,
             host_save: None,
             host_dirty: None,
+            host_save_ack: None,
+            host_save_outcomes: Default::default(),
+            pending_host_saves: Vec::new(),
             close_request: None,
             save_override: None,
             props_draft: None,
@@ -2880,6 +2910,9 @@ impl eframe::App for PdfCraftApp {
         // Reload documents whose files a build rewrote (#431).
         #[cfg(not(target_arch = "wasm32"))]
         self.watch_files();
+        // Evora (COL-09): the saves the host acknowledged since the last frame, before the host is
+        // told the unsaved state below.
+        self.apply_host_save_outcomes();
         if self.host_dirty.is_some() {
             let dirty = self.first_dirty().is_some();
             if let Some(report) = self.host_dirty.as_mut() {

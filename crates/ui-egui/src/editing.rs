@@ -542,7 +542,8 @@ impl PdfCraftApp {
     }
 
     /// Whether tab `index` has work that isn't saved: edits, or form typing not committed yet.
-    pub(crate) fn has_unsaved_work(&self, index: usize) -> bool {
+    /// Public for the Evora host bridge (COL-08: nothing to save answers `clean`).
+    pub fn has_unsaved_work(&self, index: usize) -> bool {
         let Some(v) = self.views.get(index) else { return false };
         let Some(doc) = self.session.get(v.id) else { return false };
         doc.dirty
@@ -620,10 +621,22 @@ impl PdfCraftApp {
             };
             // An embedding page that asked for saves (`?host=parent`) gets the bytes; otherwise
             // the browser downloads them.
-            let to_host = self.host_save.is_some();
-            let delivered = match &self.host_save {
-                Some(save) => save(&name, &bytes, matches!(target, SaveTarget::As)),
-                None => download(&name, &bytes),
+            let save_as = matches!(target, SaveTarget::As);
+            let to_host = self.host_save.is_some() || self.host_save_ack.is_some();
+            let delivered = match (&self.host_save_ack, &self.host_save) {
+                // Evora (COL-09): a host that acknowledges saves. The document stays modified, and
+                // `after` waits, until it reports success (`apply_host_save_outcomes`).
+                (Some(save), _) => match save(&name, &bytes, save_as) {
+                    Ok(Some(ticket)) => {
+                        let generation = self.session.get(id).map_or(0, |d| d.edit_generation());
+                        self.pending_host_saves.push(crate::PendingHostSave { ticket, id, bytes, generation, after: Box::new(after) });
+                        return false;
+                    }
+                    Ok(None) => Ok(()),
+                    Err(e) => Err(e),
+                },
+                (None, Some(save)) => save(&name, &bytes, save_as),
+                (None, None) => download(&name, &bytes),
             };
             match delivered {
                 Ok(()) => {
@@ -649,6 +662,29 @@ impl PdfCraftApp {
                     false
                 }
             }
+        }
+    }
+
+    /// Evora (COL-09): applies the outcomes a host that acknowledges saves reported since the last
+    /// frame. A save counts only on success, and only if the document hasn't changed since its bytes
+    /// were taken (HOST-PROTOCOL.md §4.5): otherwise it stays modified and `after` (closing the tab,
+    /// say) doesn't run. Marking it saved any later would reopen it from the sent bytes and lose the
+    /// changes made meanwhile.
+    pub(crate) fn apply_host_save_outcomes(&mut self) {
+        let outcomes: Vec<(u64, bool)> = self.host_save_outcomes.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+        for (ticket, ok) in outcomes {
+            let Some(at) = self.pending_host_saves.iter().position(|p| p.ticket == ticket) else { continue };
+            let pending = self.pending_host_saves.remove(at);
+            let unchanged = self.session.get(pending.id).is_some_and(|d| d.edit_generation() == pending.generation);
+            if !ok || !unchanged || self.session.mark_saved(pending.id, pending.bytes, None).is_err() {
+                continue;
+            }
+            if let Some(doc) = self.session.get(pending.id)
+                && let Some(view) = self.views.iter_mut().find(|v| v.id == pending.id)
+            {
+                view.document_changed(&doc.info);
+            }
+            (pending.after)(self);
         }
     }
 
