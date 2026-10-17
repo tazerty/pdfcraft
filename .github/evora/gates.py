@@ -21,7 +21,9 @@ import sys
 import unicodedata
 
 # Marques ArtCraft (E1) : recherche insensible à la casse, octet par octet, .wasm compris.
-BRANDS = ("artcraft", "discord.gg", "getartcraft")
+# « discord » seul (depuis EVORA-COL-21) : le nom du serveur communautaire ArtCraft, même sans URL
+# (une mesure de largeur « Discord » de la barre d'onglets survivait au retrait du bouton).
+BRANDS = ("artcraft", "discord.gg", "getartcraft", "discord")
 # Fichiers d'hébergement interdits dans l'artefact : l'hébergement est celui d'Evora.
 HOSTING_NAMES = {".htaccess", "_headers", "_redirects", "web.config", ".user.ini"}
 HOSTING_SUFFIXES = (".conf", ".php")
@@ -78,8 +80,8 @@ def rel(path, root):
 def check_brands(pkg, report):
     log(report, "### Porte des marques (E1, bloquante)")
     log(report)
-    log(report, "| Fichier | artcraft (casse ignorée) | discord.gg | getartcraft (casse ignorée) |")
-    log(report, "|---|---|---|---|")
+    log(report, "| Fichier | " + " | ".join(f"{b} (casse ignorée)" for b in BRANDS) + " |")
+    log(report, "|---|" + "---|" * len(BRANDS))
     site = {b: 0 for b in BRANDS}
     licences = 0
     for path in walk_files(pkg):
@@ -90,19 +92,19 @@ def check_brands(pkg, report):
             data = fh.read().lower()
         counts = {b: data.count(b.encode()) for b in BRANDS}
         if any(counts.values()):
-            log(report, f"| `{r}` | {counts['artcraft']} | {counts['discord.gg']} | {counts['getartcraft']} |")
+            log(report, f"| `{r}` | " + " | ".join(str(counts[b]) for b in BRANDS) + " |")
         if r.split("/", 1)[0] == LICENCES_DIR:
             licences += counts["artcraft"]
         else:
             for b in BRANDS:
                 site[b] += counts[b]
     log(report)
-    log(report, f"Hors {LICENCES_DIR}/ : artcraft **{site['artcraft']}**, discord.gg **{site['discord.gg']}**, "
-                f"getartcraft **{site['getartcraft']}** (attendu : 0) ; dans {LICENCES_DIR}/ (permis) : artcraft {licences}")
+    log(report, f"Hors {LICENCES_DIR}/ : " + ", ".join(f"{b} **{site[b]}**" for b in BRANDS)
+                + f" (attendu : 0) ; dans {LICENCES_DIR}/ (permis) : artcraft {licences}")
     log(report)
     ok = not any(site.values())
-    print(f"::notice::marques hors LICENSES : artcraft={site['artcraft']} discord.gg={site['discord.gg']} "
-          f"getartcraft={site['getartcraft']} ; LICENSES artcraft={licences}")
+    print("::notice::marques hors LICENSES : " + " ".join(f"{b}={site[b]}" for b in BRANDS)
+          + f" ; LICENSES artcraft={licences}")
     if not ok:
         print("::error::marque ArtCraft présente dans le bundle (porte E1)")
     return ok
