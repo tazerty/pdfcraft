@@ -27,7 +27,11 @@ Scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
      c) e4 écrit sa clé, une autre fenêtre de l'origine l'efface, et une perte de focus ne doit pas
         la recréer (seul l'événement storage peut l'empêcher) ;
   8. « pont-deux-instances-temoin » : le scénario 7 avec BroadcastChannel inerte et sans écouteur
-     storage dans les documents moteur, qui DOIT être rouge par ses trois seuls détecteurs.
+     storage dans les documents moteur, qui DOIT être rouge par ses trois seuls détecteurs ;
+  9. « pont-accuse » (COL-08, COL-09) : demande d'enregistrement (evora:request-save) et accusé
+     (doc.saved-ack), scénarios S-ACK-1, 2, 4, 5 et 6 de CONCEPTION-PROTOCOLE §4.1.8 ; S-ACK-3 relevé ;
+ 10. « pont-accuse-temoin » : le scénario 9 sans doc.saved-ack à evora:init (comportement amont) et
+     avec une réouverture sous un autre docRef, qui DOIT être rouge par ses cinq seuls détecteurs.
 
 doc.dirty (scénario 4, §7.1 étapes 7 et 8) : comme la coquille, qui lit le contenu du document entre
 l'accusé d'evora:init et evora:open, la page parente n'ouvre le PDF qu'après des images du moteur
@@ -251,6 +255,11 @@ window.__evoraIntrude = () => {
   MESSAGES.forEach(([type, payload], i) => engine.postMessage({v: 1, type, id: IDS[i], payload}, "*"));
   return JSON.stringify(IDS);
 };
+// S-ACK-5 : un evora:saved {ok: true} forgé pour un evora:save réel du moteur (re connu).
+window.__evoraForge = (re, id) => {
+  window.parent.frames[0].postMessage({v: 1, type: "evora:saved", id, re, payload: {ok: true, version: 9}}, "*");
+  return id;
+};
 </script>
 </body></html>
 """
@@ -260,9 +269,9 @@ def intruder_page():
     return (INTRUDER_PAGE % {"ids": json.dumps(INTRUDER_IDS)}).encode()
 
 
-def parent_page(query, host=False):
-    harness = HOST_HARNESS % {"engine": ENGINE_ORIGIN, "pdf": base64.b64encode(minimal_pdf()).decode(),
-                              "ns": NS_OWN} if host else ""
+def parent_page(query, host=False, harness=None):
+    harness = (harness or HOST_HARNESS) % {"engine": ENGINE_ORIGIN, "pdf": base64.b64encode(minimal_pdf()).decode(),
+                                           "ns": NS_OWN} if host else ""
     # Ordre des cadres : le moteur d'abord (window.frames[0] pour la page intruse).
     extra = (f'<iframe id="observer" src="{ENGINE_ORIGIN}/__evora-observer.html" width="10" height="10" style="border:0"></iframe>\n'
              f'<iframe id="intruder" src="{INTRUDER_ORIGIN}/" width="10" height="10" style="border:0"></iframe>\n') if host else ""
@@ -579,7 +588,7 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
     no_listeners = "no-listeners" in expect.get("sabotage", "").split()
     engine = start_server(PORT_A, "127.0.0.1", directory=site, csp=csp, served=served,
                           host_config={"parentOrigins": [PARENT_ORIGIN]} if host else None)
-    body = parent_page_multi(query) if multi else parent_page(query, host)
+    body = parent_page_multi(query) if multi else parent_page(query, host, ACK_HARNESS if expect.get("accuse") else None)
     parent = start_server(PORT_B, "127.0.0.1", page=body, served=served)
     # « localhost » peut se résoudre en ::1 : la page parente écoute aussi en IPv6 quand c'est possible.
     try:
@@ -718,6 +727,8 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
                 chrome.pump(0.1)
             if multi:
                 run_instances(chrome, page, contexts, result, errors)
+            elif expect.get("accuse"):
+                run_accuse(chrome, page, (sess, ctx), contexts, result, errors, expect.get("sabotage", ""))
             elif host:
                 run_ehp(chrome, page, (sess, ctx), contexts, result, errors, expect.get("sabotage", ""))
             gl = chrome.call("Runtime.evaluate", {"expression": GL_PROBE, "contextId": ctx, "returnByValue": True}, sess)
@@ -1130,6 +1141,290 @@ def run_ehp(chrome, page, engine, contexts, result, errors, sabotage=""):
     check_envelopes(state(), result, errors)
 
 
+# Scénarios « pont-accuse » et « pont-accuse-temoin » (COL-08 et COL-09 ; CONCEPTION-PROTOCOLE §4.1.8,
+# HOST-PROTOCOL.md §4.5 l.480, §7.2). Coquille minimale à la main du banc : elle journalise tout, dans
+# l'ordre où la page parente envoie et reçoit (« sent » pour ses propres envois), annonce à evora:init
+# les capacités du moteur moins celles que le banc retire (le témoin retire doc.saved-ack : comportement
+# amont), et ne répond à un evora:save que quand le banc le lui dit (__ackSend). Le moteur est modifié
+# par window.__evoraRun("page.rotate"), sonde CI du moteur (?evora-audit=1).
+ACK_HARNESS = """
+const ENGINE = "%(engine)s";
+const A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+let n = 0;
+const ulid = () => { n += 1; return "01JZZZZZZZZZZZZZZZZZZZZZ" + A[(n >> 5) %% 32] + A[n %% 32]; };
+const PDF = "%(pdf)s";
+const now = () => performance.timeOrigin + performance.now();
+const frame = document.getElementById("engine");
+const observer = document.getElementById("observer");
+const plainObject = (x) => x !== null && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype;
+const copy = (p) => JSON.parse(JSON.stringify(p, (k, v) => v instanceof ArrayBuffer ? {byteLength: v.byteLength} : v));
+const st = window.__evoraAck = {log: [], ids: {}, caps: []};
+addEventListener("message", (e) => {
+  if (e.source === observer.contentWindow) return;
+  const d = e.data;
+  const plain = plainObject(d);
+  const fromEngine = e.source === frame.contentWindow && e.origin === ENGINE;
+  st.log.push({t: now(), fromEngine, origin: e.origin, plain, keys: plain ? Object.keys(d) : [], v: plain ? d.v : null,
+               type: plain ? d.type : null, id: plain ? d.id : null, re: plain && "re" in d ? d.re : null,
+               payloadPlain: plain && plainObject(d.payload), payload: plain && d.payload ? copy(d.payload) : null});
+  if (fromEngine && plain && d.v === 1 && d.type === "evora:ready" && !st.ids.ready) {
+    st.ids.ready = d.id;
+    st.caps = Array.isArray(d.payload && d.payload.capabilities) ? d.payload.capabilities : [];
+  }
+});
+const post = (type, payload, re, transfer) => {
+  const id = ulid();
+  const m = {v: 1, type, id, payload};
+  if (re) m.re = re;
+  st.log.push({t: now(), sent: true, type, id, re: re || null, payload: copy(payload)});
+  frame.contentWindow.postMessage(m, ENGINE, transfer || []);
+  return id;
+};
+window.__ackInit = (without) => {
+  if (!st.ids.ready || st.ids.init) return null;
+  st.ids.init = post("evora:init", {lang: "fr", engineLang: "fr", theme: "dark", accent: "#4F46E5", readOnly: false,
+    storageNs: "%(ns)s", displayName: "Compte Evora", capabilities: st.caps.filter((c) => !without.includes(c)),
+    prefs: {}, limits: {maxDocumentBytes: 1048576, maxExportBytes: 1048576}}, st.ids.ready);
+  return st.ids.init;
+};
+window.__ackOpen = (docRef, name) => {
+  const bytes = Uint8Array.from(atob(PDF), (c) => c.charCodeAt(0)).buffer;
+  return post("evora:open", {docRef, name, bytes}, null, [bytes]);
+};
+window.__ackSend = (type, payload, re) => post(type, payload, re);
+"""
+ACK_DOC = "01JX" + "X" * 20 + "D1"
+ACK_DOC_OTHER = "01JX" + "X" * 20 + "D2"
+ACK_NAME = "evora-accuse.pdf"
+ACK_EXPR = "JSON.stringify(window.__evoraAck || {})"
+ACK_FORGED_ID = "01J" + "Y" * 22 + "F"
+# Invite beforeunload propre au moteur (S-ACK-4) : un événement annulable envoyé à la fenêtre du moteur
+# est-il annulé ? Autotest de l'instrument d'abord : un écouteur du banc qui annule doit être vu.
+BEFOREUNLOAD = """(() => {
+  const fire = () => { const e = new Event("beforeunload", {cancelable: true}); window.dispatchEvent(e); return e.defaultPrevented; };
+  const probe = (e) => e.preventDefault();
+  addEventListener("beforeunload", probe);
+  const selftest = fire();
+  removeEventListener("beforeunload", probe);
+  return JSON.stringify({selftest, engine: fire()});
+})()"""
+# Témoin : doc.saved-ack retiré des capacités d'evora:init (le moteur se croit enregistré dès l'envoi,
+# comportement amont) et réouverture sous un AUTRE docRef (rien à remplacer). Il DOIT rougir par les
+# cinq détecteurs S-ACK, et eux seuls.
+ACK_SABOTAGE = "no-saved-ack other-docref"
+ACK_EXPECTED = {"ack-conflit", "ack-occupe", "ack-intrus", "ack-modifie-pendant", "ack-reouverture"}
+
+
+def run_accuse(chrome, page, engine, contexts, result, errors, sabotage=""):
+    """COL-08 (evora:request-save) et COL-09 (doc.saved-ack), scénarios S-ACK de CONCEPTION-PROTOCOLE
+    §4.1.8 : chaque étape modifie d'abord le document (prémisse vérifiée : dernier evora:dirty vrai),
+    puis demande l'enregistrement et répond comme la coquille le ferait. Détecteurs : [ack-conflit]
+    (S-ACK-1), [ack-occupe] et [ack-beforeunload] (S-ACK-4), [ack-intrus] (S-ACK-5),
+    [ack-modifie-pendant] (S-ACK-2), [ack-reouverture] (S-ACK-6) ; S-ACK-3 (DEVRAIT) est relevé."""
+    sess, ctx = engine
+    temoin = "no-saved-ack" in sabotage.split()
+    other_ref = "other-docref" in sabotage.split()
+    acc = result.setdefault("accuse", {})
+    steps = acc.setdefault("etapes", [])
+
+    def evaluate(expr, session, context=None):
+        params = {"expression": expr, "returnByValue": True}
+        if context is not None:
+            params["contextId"] = context
+        r = chrome.call("Runtime.evaluate", params, session, 20)
+        if r.get("exceptionDetails"):
+            d = r["exceptionDetails"]
+            raise RuntimeError(f"évaluation : {d.get('text', '')} {describe_remote(d.get('exception', {}))}")
+        return r.get("result", {}).get("value")
+
+    def state():
+        return json.loads(evaluate(ACK_EXPR, page) or "{}")
+
+    def wait(cond, timeout=20.0):
+        end = time.monotonic() + timeout
+        st = state()
+        while not cond(st) and time.monotonic() < end:
+            chrome.pump(0.2)
+            st = state()
+        return st
+
+    def settle(seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            chrome.pump(0.1)
+
+    def sent_index(st, mid):
+        return next((i for i, m in enumerate(st.get("log", [])) if m.get("sent") and m.get("id") == mid), len(st.get("log", [])))
+
+    def dirties(st, after=-1):
+        return [(m.get("payload") or {}).get("dirty") for i, m in enumerate(st.get("log", []))
+                if i > after and m.get("fromEngine") and m.get("type") == "evora:dirty"]
+
+    def last_dirty(st):
+        d = dirties(st)
+        return d[-1] if d else None
+
+    def answer(st, rid):
+        """La réponse du moteur à la demande `rid` (evora:save ou evora:ack), ou None."""
+        return next((m for m in st.get("log", []) if m.get("fromEngine") and rid and m.get("re") == rid), None)
+
+    def send(type_, payload, re_=None):
+        return evaluate(f"window.__ackSend({json.dumps(type_)}, {json.dumps(payload)}, {json.dumps(re_)})", page)
+
+    def reply(label, save_id, payload):
+        """La coquille répond evora:saved ; renvoie l'index de cet envoi dans le journal."""
+        sid = send("evora:saved", payload, save_id)
+        steps.append({"etape": label, "evora:saved": payload})
+        settle(1.5)
+        return sent_index(state(), sid)
+
+    def request(label):
+        rid = send("evora:request-save", {"reason": "user", "docRef": ACK_DOC})
+        got = answer(wait(lambda s: answer(s, rid) is not None, 15), rid)
+        kind = got.get("type") if got else None
+        code = (got.get("payload") or {}).get("code") if got else None
+        steps.append({"etape": label, "reponse": kind, "code": code})
+        return kind, code, (got.get("id") if got else None)
+
+    def edit(label):
+        done = evaluate("typeof window.__evoraRun === 'function' && window.__evoraRun('page.rotate')", sess, ctx)
+        if done is not True:
+            errors.append(f"[banc] {label} : window.__evoraRun('page.rotate') indisponible ou refusé ({done})")
+            return False
+        st = wait(lambda s: last_dirty(s) is True, 10)
+        settle(0.5)
+        if last_dirty(st) is not True:
+            errors.append(f"[banc] {label} : le moteur ne s'est pas dit modifié après l'édition ({dirties(st)[-3:]})")
+            return False
+        return True
+
+    st = wait(lambda s: s.get("ids", {}).get("ready"))
+    if not st.get("ids", {}).get("ready"):
+        errors.append("[banc] evora:ready absent")
+        return
+    acc["capacites_annoncees"] = st.get("caps")
+    for c in ("doc.saved-ack", "doc.request-save"):
+        if c not in (st.get("caps") or []):
+            errors.append(f"[ack-capacite] {c} absente des capacités d'evora:ready : {st.get('caps')}")
+    without = ["doc.saved-ack"] if temoin else []
+    init = evaluate(f"window.__ackInit({json.dumps(without)})", page)
+    got = answer(wait(lambda s: answer(s, init) is not None), init)
+    if not got or (got.get("payload") or {}).get("ok") is not True:
+        errors.append(f"[banc] accusé d'evora:init absent ou négatif : {got}")
+        return
+    settle(1.0)
+    opened = evaluate(f"window.__ackOpen({json.dumps(ACK_DOC)}, {json.dumps(ACK_NAME)})", page)
+    st = wait(lambda s: answer(s, opened) is not None and dirties(s, sent_index(s, opened)), 15)
+    if ((answer(st, opened) or {}).get("payload") or {}).get("ok") is not True or dirties(st, sent_index(st, opened))[:1] != [False]:
+        errors.append(f"[banc] ouverture : accusé {answer(st, opened)}, evora:dirty {dirties(st, sent_index(st, opened))}")
+        return
+
+    # S-ACK-1 : evora:saved {ok: false, error: "conflict"} ⇒ le document reste modifié ; la demande
+    # suivante produit un evora:save, jamais « clean ».
+    if edit("S-ACK-1"):
+        kind, code, save = request("S-ACK-1 demande")
+        if kind != "evora:save":
+            errors.append(f"[banc] S-ACK-1 : document modifié, la demande reçoit {kind} {code or ''}")
+        else:
+            at = reply("S-ACK-1 conflit", save, {"ok": False, "error": "conflict"})
+            after = dirties(state(), at)
+            kind2, code2, save2 = request("S-ACK-1 seconde demande")
+            if False in after or kind2 != "evora:save":
+                errors.append(f"[ack-conflit] après un conflit : evora:dirty {after}, demande suivante → {kind2} "
+                              f"{code2 or ''} (attendu : rester modifié, puis evora:save)")
+            if kind2 == "evora:save":
+                reply("S-ACK-1 conflit (bis)", save2, {"ok": False, "error": "conflict"})
+    # S-ACK-4 : evora:saved {ok: false, error: "busy"} ⇒ reste modifié ; aucune invite beforeunload
+    # propre au moteur sous le pont (la coquille la possède).
+    if edit("S-ACK-4"):
+        kind, code, save = request("S-ACK-4 demande")
+        if kind != "evora:save":
+            errors.append(f"[banc] S-ACK-4 : document modifié, la demande reçoit {kind} {code or ''}")
+        else:
+            at = reply("S-ACK-4 occupé", save, {"ok": False, "error": "busy"})
+            after = dirties(state(), at)
+            bu = json.loads(evaluate(BEFOREUNLOAD, sess, ctx) or "{}")
+            acc["beforeunload"] = bu
+            if bu.get("selftest") is not True:
+                errors.append(f"[banc] instrument beforeunload muet : {bu}")
+            elif bu.get("engine") is not False:
+                errors.append(f"[ack-beforeunload] invite beforeunload propre au moteur sous le pont : {bu}")
+            kind2, code2, save2 = request("S-ACK-4 seconde demande")
+            if False in after or kind2 != "evora:save":
+                errors.append(f"[ack-occupe] après « busy » : evora:dirty {after}, demande suivante → {kind2} "
+                              f"{code2 or ''} (attendu : rester modifié, puis evora:save)")
+            if kind2 == "evora:save":
+                reply("S-ACK-4 occupé (bis)", save2, {"ok": False, "error": "busy"})
+    # S-ACK-5 : un evora:saved {ok: true} forgé par une origine non admise est ignoré (le moteur reste
+    # modifié) ; le même message venu de la coquille, lui, rend le document enregistré (témoin interne).
+    intruder = [k for k, o in contexts.items() if o == INTRUDER_ORIGIN]
+    if edit("S-ACK-5"):
+        kind, code, save = request("S-ACK-5 demande")
+        if kind != "evora:save" or not intruder:
+            errors.append(f"[banc] S-ACK-5 : demande → {kind} {code or ''} ; page intruse {'présente' if intruder else 'absente'}")
+        else:
+            settle(1.0)
+            mark = len(state().get("log", [])) - 1
+            isess, ictx = intruder[-1]
+            forged = evaluate(f"window.__evoraForge({json.dumps(save)}, {json.dumps(ACK_FORGED_ID)})", isess, ictx)
+            settle(1.5)
+            st = state()
+            after_forged, still = dirties(st, mark), last_dirty(st)
+            reply("S-ACK-5 accusé de la coquille", save, {"ok": True, "version": 2})
+            kind2, code2, _ = request("S-ACK-5 demande après l'accusé")
+            acc["s_ack_5"] = {"forge": forged, "dirty_apres_forge": after_forged, "dernier_dirty": still,
+                              "apres_accuse": [kind2, code2]}
+            if forged != ACK_FORGED_ID or False in after_forged or still is not True \
+                    or (kind2, code2) != ("evora:ack", "clean"):
+                errors.append(f"[ack-intrus] evora:saved forgé par {INTRUDER_ORIGIN} : evora:dirty ensuite {after_forged}, "
+                              f"dernier état {still} ; après l'accusé de la coquille : {kind2} {code2 or ''} (attendu : "
+                              "aucun effet du message forgé, document modifié, puis « clean » après l'accusé légitime)")
+    # S-ACK-2 : une modification entre evora:save et evora:saved {ok: true} ⇒ evora:dirty {dirty: true}
+    # APRÈS l'accusé (l.480) ; puis S-ACK-3 relevé : accusé sans modification ⇒ evora:dirty {dirty: false}.
+    if edit("S-ACK-2"):
+        kind, code, save = request("S-ACK-2 demande")
+        if kind != "evora:save":
+            errors.append(f"[banc] S-ACK-2 : document modifié, la demande reçoit {kind} {code or ''}")
+        else:
+            settle(0.5)
+            if evaluate("window.__evoraRun('page.rotate')", sess, ctx) is not True:
+                errors.append("[banc] S-ACK-2 : modification pendant l'aller-retour refusée")
+            settle(1.5)
+            at = reply("S-ACK-2 accusé après une modification", save, {"ok": True, "version": 3})
+            st = wait(lambda s: dirties(s, at), 5)
+            after = dirties(st, at)
+            kind2, code2, save2 = request("S-ACK-2 seconde demande")
+            if after[:1] != [True] or kind2 != "evora:save":
+                errors.append(f"[ack-modifie-pendant] modification pendant l'envoi, puis evora:saved {{ok: true}} : "
+                              f"evora:dirty ensuite {after}, demande suivante → {kind2} {code2 or ''} (attendu : "
+                              "d'abord {dirty: true}, puis evora:save)")
+            if kind2 == "evora:save":
+                at3 = reply("S-ACK-3 accusé sans modification", save2, {"ok": True, "version": 4})
+                acc["s_ack_3"] = dirties(wait(lambda s: dirties(s, at3), 5), at3)
+    # S-ACK-6 : evora:open du même docRef sur un document modifié (« Recharger la version du serveur ») ⇒
+    # contenu remplacé, accusé positif (jamais busy), puis evora:dirty {dirty: false} ; rien à enregistrer.
+    if edit("S-ACK-6"):
+        ref = ACK_DOC_OTHER if other_ref else ACK_DOC
+        opened2 = evaluate(f"window.__ackOpen({json.dumps(ref)}, {json.dumps(ACK_NAME)})", page)
+        st = wait(lambda s: answer(s, opened2) is not None and dirties(s, sent_index(s, opened2)), 10)
+        p = (answer(st, opened2) or {}).get("payload") or {}
+        after = dirties(st, sent_index(st, opened2))
+        kind2, code2 = (None, None) if other_ref else request("S-ACK-6 demande après réouverture")[:2]
+        if p.get("ok") is not True or after[:1] != [False] or (not other_ref and (kind2, code2) != ("evora:ack", "clean")):
+            errors.append(f"[ack-reouverture] réouverture du document modifié : accusé {p}, evora:dirty ensuite {after}, "
+                          f"demande suivante → {kind2} {code2 or ''} (attendu : accusé positif, {{dirty: false}}, « clean »)")
+    # Enveloppes et charges utiles de tout ce que le moteur a envoyé (§3, §4.4, §4.5).
+    for m in state().get("log", []):
+        if not m.get("fromEngine"):
+            continue
+        rule = PAYLOAD_KEYS.get(m.get("type"))
+        p = m.get("payload") or {}
+        if m.get("v") != 1 or not m.get("payloadPlain") or rule is None or not rule[0] <= set(p) <= rule[1] \
+                or not ULID_RE.match(str(m.get("id"))) or (m.get("re") is not None and not ULID_RE.match(str(m.get("re")))):
+            errors.append(f"[ehp] message du moteur non conforme : {m.get('type')} {p}")
+    acc["messages"] = [{k: m.get(k) for k in ("sent", "type", "re", "payload")} for m in state().get("log", [])][-60:]
+
+
 def check_save(st, errors):
     """doc.save : un evora:save conforme (§4.4), pour le document ouvert par la page parente."""
     ids = st.get("ids", {})
@@ -1491,6 +1786,15 @@ def main(argv):
                                 instances_query, {"ehp": True, "instances": True, "sabotage": INSTANCES_SABOTAGE})
         results.append(mark_witness(witness2, INSTANCES_EXPECTED, f"{INSTANCES_SABOTAGE} : BroadcastChannel inerte et "
                                     "aucun écouteur storage dans les documents moteur"))
+        # COL-08 et COL-09 : demande d'enregistrement et accusé (S-ACK), puis son témoin, qui DOIT rougir
+        # par ses cinq seuls détecteurs (ACK_EXPECTED).
+        accuse_query = "?host=evora&evora-audit=1"
+        results.append(run_scenario("pont-accuse", site, engine_csp(hashes), out_dir, chrome_bin, accuse_query,
+                                    {"ehp": True, "accuse": True}))
+        witness3 = run_scenario("pont-accuse-temoin", site, engine_csp(hashes), out_dir, chrome_bin, accuse_query,
+                                {"ehp": True, "accuse": True, "sabotage": ACK_SABOTAGE})
+        results.append(mark_witness(witness3, ACK_EXPECTED, f"{ACK_SABOTAGE} : doc.saved-ack retiré d'evora:init "
+                                    "(comportement amont), réouverture sous un autre docRef"))
     with open(os.path.join(out_dir, "smoke.json"), "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2, ensure_ascii=False)
 
@@ -1540,6 +1844,10 @@ def main(argv):
                 log(f"- {r['scenario']} : clés localStorage de l'origine moteur après rechargement : {r['storage_keys']}")
             if "audit" in r:
                 log(f"- {r['scenario']} : audit au rendu E9/E10 (window.__evoraAudit) : {r['audit']}")
+            if "accuse" in r:
+                log(f"- {r['scenario']} : demande d'enregistrement et accusé (COL-08, COL-09) : "
+                    + json.dumps({k: v for k, v in r["accuse"].items() if k != "messages"}, ensure_ascii=False)[:2400])
+                log(f"- {r['scenario']} : échanges (fin) : " + json.dumps(r["accuse"].get("messages", []), ensure_ascii=False)[:2400])
             if "instances" in r:
                 log(f"- {r['scenario']} : stockage entre pages de l'origine moteur (E5) : "
                     + json.dumps({k: v for k, v in r["instances"].items() if k != "messages"}, ensure_ascii=False)[:2400])
