@@ -32,6 +32,10 @@ Scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
      (doc.saved-ack), scénarios S-ACK-1, 2, 4, 5 et 6 de CONCEPTION-PROTOCOLE §4.1.8 ; S-ACK-3 relevé ;
  10. « pont-accuse-temoin » : le scénario 9 sans doc.saved-ack à evora:init (comportement amont) et
      avec une réouverture sous un autre docRef, qui DOIT être rouge par ses cinq seuls détecteurs.
+ 11. « masquages » (COL-05, COL-10, OCR, Q47 (a)) : au rendu, sur les surfaces du démarrage (Home et
+     All tools), aucun libellé masqué n'est dessiné (MASKED_PROBES), et les témoins voisins le sont
+     (KEPT_PROBES : sans eux, une surface non dessinée passerait pour un masquage). La recette
+     complète, surface par surface, est tests/evora_masks.rs (job « masques »).
 
 doc.dirty (scénario 4, §7.1 étapes 7 et 8) : comme la coquille, qui lit le contenu du document entre
 l'accusé d'evora:init et evora:open, la page parente n'ouvre le PDF qu'après des images du moteur
@@ -68,6 +72,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 PORT_A = 8801
 PORT_B = 8802
@@ -102,6 +107,12 @@ IFRAME_W, IFRAME_H = 1280, 800
 # Paramètres de l'URL du moteur dans l'iframe. Avant le pont EHP natif (E4), aucun : le pont amont
 # ?host=parent ne parle qu'à sa propre origine et Chrome signalerait chaque envoi refusé.
 ENGINE_QUERY = os.environ.get("EVORA_SMOKE_QUERY", "")
+# Scénario « masquages » (EVORA-COL-25) : libellés anglais du catalogue qui ne doivent jamais être
+# dessinés au démarrage (groupes Scan & OCR et Redact a PDF de All tools ; « Remove hidden
+# information » sur la carte Protect a PDF de Home), et témoins des mêmes surfaces, qui doivent l'être.
+# Écrits ici, indépendamment de crates/ui-egui/src/evora.rs.
+MASKED_PROBES = ["Scan & OCR", "Redact a PDF", "Remove hidden information"]
+KEPT_PROBES = ["Export a PDF", "Protect a PDF", "Protect with password"]
 READY_TIMEOUT = 180.0
 ERROR_GRACE = 30.0
 SETTLE = 4.0
@@ -750,6 +761,20 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
                     errors.append(f"[test] thème au rendu : sombre={a.get('dark')} (attendu : {expect['dark']})")
                 if a and expect.get("probe") and not a.get("probe"):
                     errors.append(f"[test] texte attendu au rendu absent (sonde {expect['probe']!r}) : langue non appliquée ?")
+                if a and expect.get("masks"):
+                    # COL-05, COL-10, OCR, Q47 (a) au rendu : un compte par sonde (?evora-probe=a|b|c).
+                    probes = a.get("probes")
+                    if not isinstance(probes, dict) or sorted(probes) != sorted(MASKED_PROBES + KEPT_PROBES):
+                        errors.append(f"[masquage-instrument] sondes non relevées une à une par l'audit : {probes!r}")
+                    else:
+                        missing = [p for p in KEPT_PROBES if not probes.get(p)]
+                        drawn = {p: probes[p] for p in MASKED_PROBES if probes.get(p)}
+                        result["masks"] = {"masques": {p: probes[p] for p in MASKED_PROBES},
+                                           "temoins": {p: probes[p] for p in KEPT_PROBES}}
+                        if missing:
+                            errors.append(f"[masquage-temoin] surfaces du démarrage non dessinées (témoins à 0) : {missing}")
+                        if drawn:
+                            errors.append(f"[masquage] libellés masqués dessinés au rendu (fois) : {drawn}")
             res = chrome.call("Runtime.evaluate", {"expression": RESOURCES, "contextId": ctx, "returnByValue": True}, sess)
             result["resources"] = json.loads(res.get("result", {}).get("value", "[]"))
             msgs = chrome.call("Runtime.evaluate", {"expression": "JSON.stringify(window.__evoraMessages || [])",
@@ -1795,6 +1820,12 @@ def main(argv):
                                 {"ehp": True, "accuse": True, "sabotage": ACK_SABOTAGE})
         results.append(mark_witness(witness3, ACK_EXPECTED, f"{ACK_SABOTAGE} : doc.saved-ack retiré d'evora:init "
                                     "(comportement amont), réouverture sous un autre docRef"))
+        # COL-05, COL-10, OCR, Q47 (a) : masquages vus au rendu sur les surfaces du démarrage, et leurs
+        # témoins (tests/evora_masks.rs juge toutes les autres surfaces).
+        masks_query = (f"{ENGINE_QUERY}{sep}evora-probe="
+                       + urllib.parse.quote("|".join(MASKED_PROBES + KEPT_PROBES), safe=""))
+        results.append(run_scenario("masquages", site, engine_csp(hashes), out_dir, chrome_bin, masks_query,
+                                    {"masks": True, "dark": False}))
     with open(os.path.join(out_dir, "smoke.json"), "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2, ensure_ascii=False)
 
@@ -1844,6 +1875,9 @@ def main(argv):
                 log(f"- {r['scenario']} : clés localStorage de l'origine moteur après rechargement : {r['storage_keys']}")
             if "audit" in r:
                 log(f"- {r['scenario']} : audit au rendu E9/E10 (window.__evoraAudit) : {r['audit']}")
+            if "masks" in r:
+                log(f"- {r['scenario']} : masquages au rendu (textes dessinés qui contiennent chaque sonde) : "
+                    + json.dumps(r["masks"], ensure_ascii=False))
             if "accuse" in r:
                 log(f"- {r['scenario']} : demande d'enregistrement et accusé (COL-08, COL-09) : "
                     + json.dumps({k: v for k, v in r["accuse"].items() if k != "messages"}, ensure_ascii=False)[:2400])
