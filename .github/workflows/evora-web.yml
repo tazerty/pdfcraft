@@ -29,6 +29,12 @@
 # purge dans l'un n'est démentie par aucun autre (diffusion, événement storage), avec son témoin
 # sabordé (BroadcastChannel inerte, aucun écouteur storage) qui doit rougir.
 #
+# Masquages de l'Atelier (EVORA-COL-25 ; COL-05, COL-10, OCR, hypothèse Q47 (a)) : job « masques »,
+# tests natifs de pdfcraft-ui-egui dans le vrai shell (egui_kittest, AccessKit et textes dessinés),
+# crates/ui-egui/tests/evora_masks.rs, sur toutes les surfaces qui listent des commandes ; et, au rendu
+# du bundle, scénario de fumée « masquages » (surfaces du démarrage). Paquets système du job natif :
+# ceux qu'exigent egui, winit et rfd sous Linux (dépôts Ubuntu du runner) ; aucun outil tiers.
+#
 # Sortie : artefact de run evora-colophon-atelier-web-<tag> (archive .zip avec .br/.gz, LICENSES/
 # et csp-hashes.txt ; SHA256SUMS ; BUILD-INFO.txt ; csp-hashes.txt) et artefact evora-smoke-<tag>.
 # Le nom Evora n'a été pris qu'après E1 (retrait des marques ArtCraft) et le vert des portes.
@@ -431,3 +437,52 @@ jobs:
           name: evora-smoke-${{ steps.meta.outputs.tag }}
           path: evora-ci/smoke/
           if-no-files-found: ignore
+
+  masques:
+    name: Masquages de l'Atelier (tests natifs ui-egui)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout de la branche Evora
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Paquets système (egui, winit, rfd sous Linux)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev libgtk-3-dev
+
+      - name: Rust (rustup, version épinglée)
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version --verbose
+          cargo --version
+
+      - name: Cache cargo (registre, dépôts git, target natif)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: evora-masques-${{ runner.os }}-rust${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            evora-masques-${{ runner.os }}-rust${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Dépendances cargo (Cargo.lock verrouillé)
+        run: cargo fetch --locked
+
+      - name: Recette des masquages (bloquante)
+        env:
+          # Le verdict de chaque famille s'imprime en entier (fautes nommées une à une).
+          RUST_BACKTRACE: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline -p pdfcraft-ui-egui --test evora_masks -- --test-threads=1 --nocapture

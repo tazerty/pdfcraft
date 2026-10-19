@@ -584,8 +584,10 @@ mod e10 {
         terms: u64,
         sample: String,
         dark: bool,
-        probe: Option<String>,
         probe_hits: u64,
+        /// `?evora-probe=a|b|c` (EVORA-COL-25): texts drawn that contain each probe. One probe
+        /// without `|` counts as before; `probe` (texts with any probe) stays.
+        probes: Vec<(String, u64)>,
     }
 
     fn sensitive_terms(text: &str) -> u64 {
@@ -606,7 +608,8 @@ mod e10 {
 
     impl Audit {
         pub fn new(probe: Option<String>) -> Self {
-            Self { probe: probe.filter(|p| !p.is_empty()), ..Self::default() }
+            let probes: Vec<(String, u64)> = probe.as_deref().map(|p| p.split('|').filter(|s| !s.is_empty()).map(|s| (s.to_string(), 0)).collect()).unwrap_or_default();
+            Self { probes, ..Self::default() }
         }
 
         fn scan(&mut self, shape: &egui::Shape) {
@@ -621,7 +624,14 @@ mod e10 {
                     let shown = text.galley.text();
                     let emoji = shown.chars().filter(|c| is_emoji_like(*c)).count() as u64;
                     let terms = sensitive_terms(shown);
-                    if self.probe.as_deref().is_some_and(|p| shown.contains(p)) {
+                    let mut hit = false;
+                    for (probe, count) in &mut self.probes {
+                        if shown.contains(probe.as_str()) {
+                            *count += 1;
+                            hit = true;
+                        }
+                    }
+                    if hit {
                         self.probe_hits += 1;
                     }
                     if emoji + terms > 0 {
@@ -651,6 +661,11 @@ mod e10 {
             ] {
                 let _ = js_sys::Reflect::set(&report, &JsValue::from_str(key), &value);
             }
+            let probes = js_sys::Object::new();
+            for (probe, count) in &self.probes {
+                let _ = js_sys::Reflect::set(&probes, &JsValue::from_str(probe), &JsValue::from_f64(*count as f64));
+            }
+            let _ = js_sys::Reflect::set(&report, &JsValue::from_str("probes"), &probes);
             let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__evoraAudit"), &report);
         }
     }
