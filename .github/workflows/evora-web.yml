@@ -237,7 +237,7 @@ jobs:
           set +e
           set -uo pipefail
           LOG="$RUNNER_TEMP/cargo-deny.log"
-          cargo deny --log-level warn check --config "$RUNNER_TEMP/deny.toml" advisories bans licenses sources 2>&1 | tee "$LOG"
+          cargo deny --log-level warn --config "$RUNNER_TEMP/deny.toml" check advisories bans licenses sources 2>&1 | tee "$LOG"
           status=${PIPESTATUS[0]}
           set -e
           # Comptage sur une copie sans codes de couleur ANSI.
