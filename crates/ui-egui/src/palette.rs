@@ -74,8 +74,9 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
         }
     }
     // Evora (COL-05, COL-10): tool groups whose items are all hidden, and hidden catalogue items,
-    // stay out of the palette.
-    for g in crate::evora::visible_groups() {
+    // stay out of the palette (EVORA-COL-32: the groups through `palette_groups`, which a CI witness
+    // reopens).
+    for g in crate::evora::palette_groups() {
         if let Some(s) = score(tl!(g.label), &q).or_else(|| score(g.label, &q)) {
             hits.push((
                 s,

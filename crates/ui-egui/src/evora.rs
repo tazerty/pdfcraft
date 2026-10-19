@@ -90,6 +90,13 @@ pub(crate) fn visible_groups() -> impl Iterator<Item = &'static ToolGroup> {
     catalog::TOOL_GROUPS.iter().filter(|g| !hidden_group(g))
 }
 
+/// The tool groups the command palette lists: [`visible_groups`]. Under the CI witness
+/// `evora-witness-palette-groups` (never in the web build), every catalogue group, as upstream, so
+/// that tests/evora_masks.rs shows its palette checks of hidden groups fail without this filter.
+pub(crate) fn palette_groups() -> impl Iterator<Item = &'static ToolGroup> {
+    catalog::TOOL_GROUPS.iter().filter(|g| cfg!(feature = "evora-witness-palette-groups") || !hidden_group(g))
+}
+
 /// Whether tool panel `id` may open (an id the catalogue doesn't know is left to the caller).
 pub(crate) fn tool_allowed(id: &str) -> bool {
     catalog::group(id).is_none_or(|g| !hidden_group(g))

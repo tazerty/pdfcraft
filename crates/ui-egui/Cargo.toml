@@ -14,6 +14,10 @@ workspace = true
 # tests/evora_masks.rs shows it fails by the checks that depend on that guard alone. Never enabled by
 # the web build.
 evora-witness-enforce = []
+# Evora (EVORA-COL-32): CI witness of the command palette's filter of hidden tool groups (the palette
+# lists every catalogue group, as upstream), so that tests/evora_masks.rs shows its palette group checks
+# fail without that filter alone. Never enabled by the web build.
+evora-witness-palette-groups = []
 
 [dependencies]
 craft-ui = { workspace = true }
