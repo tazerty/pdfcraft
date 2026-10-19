@@ -14,6 +14,12 @@ Sous-commandes :
                              crate concernée est absente du graphe web, cargo tree wasm32, vérifié
                              à chaque run) ; statut 1 si une exception est mal formée, déjà ignorée
                              par l'amont, ou si sa crate est dans le graphe web.
+  masks-witness MAIN_LOG WITNESS_LOG
+                             témoin sabordé de la garde des masquages (EVORA-COL-30) : la recette
+                             tests/evora_masks.rs, garde `enforce` coupée, doit rougir par les seuls
+                             contrôles qui en dépendent (état posé directement, automatisation, clic
+                             sur un champ de signature vide), mêmes inventaires que la course normale ;
+                             statut 1 sinon.
 
 Chaque mesure est écrite dans REPORT (Markdown, repris dans le résumé du job) et dans le journal.
 """
@@ -578,6 +584,62 @@ def cmd_deny_config(upstream, evora, out_path, report_path):
     return 1 if problems else 0
 
 
+# Contrôles de tests/evora_masks.rs qui ne tiennent que par la garde `enforce` (début du libellé).
+ENFORCE_ONLY = ("clic sur le champ vide", "automatisation ", "dialogue ", "outil de page ")
+MASK_FAMILIES = ("ids", "signature", "caviardage", "ocr", "perimetre-q47", "temoins")
+MASK_COUNTS = re.compile(r"^\[([a-z0-9-]+)\] (\d+) contrôle\(s\), (\d+) faute\(s\)$", re.M)
+MASK_FAULT = re.compile(r"^\[([a-z0-9-]+)\] FAUTE (.*)$", re.M)
+
+
+def mask_log(path):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        text = re.sub(r"\x1b\[[0-9;]*m", "", fh.read())
+    counts = {m.group(1): (int(m.group(2)), int(m.group(3))) for m in MASK_COUNTS.finditer(text)}
+    return counts, MASK_FAULT.findall(text)
+
+
+def cmd_masks_witness(main_path, witness_path):
+    """Témoin sabordé de la garde des masquages : rouge par ses seuls détecteurs, inventaires constants."""
+    main_counts, main_faults = mask_log(main_path)
+    counts, faults = mask_log(witness_path)
+    problems = []
+    for name, got in (("course normale", main_counts), ("témoin", counts)):
+        if sorted(got) != sorted(MASK_FAMILIES):
+            problems.append(f"{name} : familles relevées {sorted(got)}, attendues {sorted(MASK_FAMILIES)}")
+    if main_faults or any(f for _, f in main_counts.values()):
+        problems.append(f"course normale rouge : {len(main_faults)} faute(s), le témoin ne se juge que sur un vert")
+    for family in MASK_FAMILIES:
+        if family in counts and family in main_counts and counts[family][0] != main_counts[family][0]:
+            problems.append(f"{family} : {counts[family][0]} contrôles sous le témoin, {main_counts[family][0]} en course normale")
+    for family in ("ids", "temoins"):
+        if counts.get(family, (0, 1))[1] != 0:
+            problems.append(f"{family} : rouge sous le témoin (une garde voisine ou l'instrument dépend d'enforce)")
+    for family in ("signature", "caviardage", "ocr", "perimetre-q47"):
+        if counts.get(family, (0, 0))[1] == 0:
+            problems.append(f"{family} : vert sous le témoin, enforce n'y est pas éprouvée")
+    stray = [(family, f) for family, f in faults if not f.startswith(ENFORCE_ONLY)]
+    for family, f in stray:
+        problems.append(f"{family} : faute étrangère à enforce sous le témoin : {f}")
+    lines = ["### Témoin sabordé de la garde des masquages (enforce coupée)", "",
+             "| Famille | Contrôles (normale / témoin) | Fautes sous le témoin |", "|---|---|---|"]
+    for family in MASK_FAMILIES:
+        n_main = main_counts.get(family, ("?", "?"))[0]
+        n_w, f_w = counts.get(family, ("?", "?"))
+        lines.append(f"| {family} | {n_main} / {n_w} | {f_w} |")
+    lines.append("")
+    lines.append(f"Fautes sous le témoin : {len(faults)}, toutes dépendantes d'enforce : {'oui' if not stray else 'NON'} ; "
+                 f"verdict : {'témoin VALIDE' if not problems else 'témoin INVALIDE'}.")
+    lines.extend(f"- ÉCHEC : {p}" for p in problems)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    print("\n".join(lines))
+    for p in problems:
+        print(f"::error::témoin des masquages : {p}")
+    return 1 if problems else 0
+
+
 def main(argv):
     if len(argv) >= 2 and argv[1] == "check" and len(argv) == 5:
         return cmd_check(argv[2], argv[3], argv[4])
@@ -591,6 +653,8 @@ def main(argv):
         return cmd_fonts(argv[2], argv[3])
     if len(argv) >= 2 and argv[1] == "deny-config" and len(argv) == 6:
         return cmd_deny_config(argv[2], argv[3], argv[4], argv[5])
+    if len(argv) >= 2 and argv[1] == "masks-witness" and len(argv) == 4:
+        return cmd_masks_witness(argv[2], argv[3])
     print(__doc__)
     return 2
 

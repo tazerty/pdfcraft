@@ -129,6 +129,10 @@ fn tool_command(tool: &QuickTool) -> Option<&'static str> {
 /// Run at the start of every frame (`logic` and `ui`): no dialog, page tool or tool panel that only
 /// a hidden command opens stays open, whatever opened it.
 pub(crate) fn enforce(app: &mut PdfCraftApp) {
+    // CI witness only (`--features evora-witness-enforce`, never in the web build): the guard is off.
+    if cfg!(feature = "evora-witness-enforce") {
+        return;
+    }
     if app.dialog.as_ref().and_then(dialog_command).is_some_and(hidden) {
         app.dialog = None;
     }
