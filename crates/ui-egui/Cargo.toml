@@ -9,6 +9,12 @@ rust-version = "1.95"
 [lints]
 workspace = true
 
+[features]
+# Evora (EVORA-COL-30): CI witness of the Atelier's masks guard (`evora::enforce` switched off), so that
+# tests/evora_masks.rs shows it fails by the checks that depend on that guard alone. Never enabled by
+# the web build.
+evora-witness-enforce = []
+
 [dependencies]
 craft-ui = { workspace = true }
 pdfcraft-fonts = { workspace = true }
