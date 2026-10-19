@@ -28,8 +28,9 @@ pub fn left_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             _ if app.active.is_some() && crate::organize_panel::showing(app) => crate::organize_panel::panel(app, ui, &t),
             LeftPanel::AllTools => all_tools(app, ui, &t),
             LeftPanel::Tool(id) => match catalog::group(id) {
-                Some(g) => tool_detail(app, ui, &t, g),
-                None => app.left = LeftPanel::AllTools,
+                // Evora (COL-05, COL-10): a group whose items are all hidden never shows.
+                Some(g) if !crate::evora::hidden_group(g) => tool_detail(app, ui, &t, g),
+                _ => app.left = LeftPanel::AllTools,
             },
             LeftPanel::CalculationOrder => crate::calc_order_ui::panel(app, ui, &t),
         },
@@ -75,8 +76,10 @@ fn all_tools(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     }
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(2.0);
-        let shown = if app.all_tools_expanded { TOOL_GROUPS.len() } else { COLLAPSED_TOOLS.min(TOOL_GROUPS.len()) };
-        for g in &TOOL_GROUPS[..shown] {
+        // Evora (COL-05, COL-10): groups whose items are all hidden are left out.
+        let groups: Vec<&'static ToolGroup> = crate::evora::visible_groups().collect();
+        let shown = if app.all_tools_expanded { groups.len() } else { COLLAPSED_TOOLS.min(groups.len()) };
+        for g in &groups[..shown] {
             if tool_row(ui, t, g).clicked() {
                 app.select_tool(g.id);
             }
@@ -209,8 +212,15 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
     egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(list_h).show(ui, |ui| {
         ui.add_space(2.0);
         for s in g.sections {
+            // Evora (COL-05, COL-10): hidden items, and sections left with none, are not listed.
+            if s.items.iter().all(|i| crate::evora::hidden(i.command)) {
+                continue;
+            }
             widgets::section_title(ui, tl!(s.title));
             for item in s.items {
+                if crate::evora::hidden(item.command) {
+                    continue;
+                }
                 if g.id == "fill_sign" && (item.command.starts_with("sign.fill.signature") || item.command.starts_with("sign.fill.initials")) {
                     continue;
                 }

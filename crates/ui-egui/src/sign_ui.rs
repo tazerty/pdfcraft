@@ -1257,7 +1257,8 @@ pub(crate) fn panel(ui: &mut egui::Ui, t: &Tokens, sigs: &[SignatureInfo], expan
         egui::Frame::NONE.inner_margin(egui::Margin { left: 44, right: 4, top: 2, bottom: 8 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
             if !s.signed {
-                if widgets::pill_button(ui, tl!("Sign this field…"), true).clicked() {
+                // Evora (COL-05, D-9): digital signing belongs to Evora Sign; the field is only shown.
+                if !crate::evora::hidden("sign.digital") && widgets::pill_button(ui, tl!("Sign this field…"), true).clicked() {
                     action = Some(PanelAction::Sign(s.field.clone()));
                 }
                 return;

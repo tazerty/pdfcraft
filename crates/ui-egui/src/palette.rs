@@ -2,7 +2,7 @@
 //! catalogue, with a fuzzy-ish substring match.
 
 use egui::{Align2, CornerRadius, Rect, Sense, Stroke, vec2};
-use pdfcraft_engine::catalog::{Availability, TOOL_GROUPS};
+use pdfcraft_engine::catalog::Availability;
 
 use crate::theme::{self, Tokens};
 use crate::{PdfCraftApp, icons};
@@ -73,7 +73,9 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
             ));
         }
     }
-    for g in TOOL_GROUPS {
+    // Evora (COL-05, COL-10): tool groups whose items are all hidden, and hidden catalogue items,
+    // stay out of the palette.
+    for g in crate::evora::visible_groups() {
         if let Some(s) = score(tl!(g.label), &q).or_else(|| score(g.label, &q)) {
             hits.push((
                 s,
@@ -89,8 +91,8 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
         }
         for sec in g.sections {
             for i in sec.items {
-                if pdfcraft_engine::commands::command(i.command).is_some() {
-                    continue; // listed above as a command
+                if pdfcraft_engine::commands::command(i.command).is_some() || crate::evora::hidden(i.command) {
+                    continue; // listed above as a command, or hidden (Evora)
                 }
                 if let Some(s) = score(tl!(i.label), &q).or_else(|| score(i.label, &q)).or_else(|| score(i.command, &q).map(|s| s + 50)) {
                     hits.push((

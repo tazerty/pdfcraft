@@ -604,6 +604,10 @@ pub(crate) fn header_controls(ui: &mut egui::Ui, info: &DocInfo, view: &mut DocV
             ("comment.export", tl!("Export all to data file…")),
             ("comment.import", tl!("Import comments…")),
         ] {
+            // Evora (Q47 (a)): hidden commands (XFDF and FDF imports) aren't offered.
+            if crate::evora::hidden(id) {
+                continue;
+            }
             if ui.button(tl!(label)).clicked() {
                 command = Some(id);
                 ui.close();

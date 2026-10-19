@@ -88,7 +88,8 @@ mod edit_text_ui;
 pub mod field_table_ui;
 pub use edit_text_ui::CropMode;
 mod editing;
-// Evora (E7): neutralised commands (update check, outbound project links).
+// Evora (E7, COL-05, COL-10): hidden commands and tools (update check, outbound project links,
+// digital signatures, redaction, OCR and the Atelier's scope), kept out of reach every frame.
 mod evora;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file_watch;
@@ -2447,6 +2448,10 @@ impl PdfCraftApp {
 
     /// Run a catalogue command. Commands that aren't implemented yet say which milestone ships them.
     pub fn run_command(&mut self, command: &str) {
+        // Evora (E7, COL-05, COL-10): hidden commands and catalogue items do nothing.
+        if crate::evora::hidden(command) {
+            return;
+        }
         if let Some(spec) = pdfcraft_engine::commands::command(command) {
             use pdfcraft_engine::commands::Needs;
             // A tool that needs a document, chosen with none open, asks for the file and then
@@ -2510,6 +2515,10 @@ impl PdfCraftApp {
     /// Enter a tool from the catalogue, Home, palette or control channel. Organize is a
     /// workspace, so opening its panel also opens the page grid (without toggling it off).
     pub(crate) fn select_tool(&mut self, id: &'static str) {
+        // Evora (COL-05, COL-10): a tool group whose items are all hidden doesn't open.
+        if !crate::evora::tool_allowed(id) {
+            return;
+        }
         // The tool's panel shows, not the expanded All tools view over it.
         self.all_tools_full = false;
         self.left = LeftPanel::Tool(id);
@@ -3517,6 +3526,8 @@ impl eframe::App for PdfCraftApp {
         self.ctx = Some(ctx.clone());
         #[cfg(not(target_arch = "wasm32"))]
         self.window_state.repair(ctx);
+        // Evora (COL-05, COL-10): no dialog, page tool or tool panel of a hidden command stays open.
+        crate::evora::enforce(self);
         self.dialog_epoch();
         // Notices raised outside `ui` (opened files, OS events, the control channel) translate too.
         let lang = i18n::Lang::from_pref(&self.language);
@@ -3689,6 +3700,8 @@ impl eframe::App for PdfCraftApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Evora (COL-05, COL-10): again before drawing, for what `logic` and hosts opened since.
+        crate::evora::enforce(self);
         i18n::set_current(i18n::Lang::from_pref(&self.language));
         // Fonts registered via set_fonts only take effect next frame; named families would panic now.
         if !self.fonts_ready {
