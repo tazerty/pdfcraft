@@ -587,8 +587,10 @@ def cmd_deny_config(upstream, evora, out_path, report_path):
 # Contrôles de tests/evora_masks.rs qui ne tiennent que par la garde `enforce` (début du libellé).
 ENFORCE_ONLY = ("clic sur le champ vide", "automatisation ", "dialogue ", "outil de page ")
 MASK_FAMILIES = ("ids", "signature", "caviardage", "ocr", "perimetre-q47", "temoins")
-MASK_COUNTS = re.compile(r"^\[([a-z0-9-]+)\] (\d+) contrôle\(s\), (\d+) faute\(s\)$", re.M)
-MASK_FAULT = re.compile(r"^\[([a-z0-9-]+)\] FAUTE (.*)$", re.M)
+# Sans ancrage en début de ligne : le harnais de cargo test écrit « test <nom> ... » sans saut de ligne
+# avant la sortie du test, qui commence donc au milieu de la ligne (run 39200498133).
+MASK_COUNTS = re.compile(r"\[([a-z0-9-]+)\] (\d+) contrôle\(s\), (\d+) faute\(s\)$", re.M)
+MASK_FAULT = re.compile(r"\[([a-z0-9-]+)\] FAUTE (.*)$", re.M)
 
 
 def mask_log(path):
