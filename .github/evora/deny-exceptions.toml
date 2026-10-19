@@ -1,0 +1,24 @@
+# Evora : exceptions à la politique cargo-deny de l'amont (deny.toml, inchangé), une par avis, avec la
+# crate visée, sa raison et sa preuve. `gates.py deny-config` les fusionne dans la configuration de la
+# porte et refuse (statut 1) une exception mal formée, un avis que l'amont ignore déjà (exception à
+# retirer) ou une crate présente dans le graphe du build web (cargo tree, cible wasm32, à chaque run).
+
+# Avis publiés après le run 39013611888 (2026-10-17, vert) : zbus 6 a absorbé zvariant, zbus_names et
+# zvariant_derive ; « No safe upgrade is available » (accesskit_unix et atspi tiennent zbus 5).
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0370"
+crate = "zvariant"
+reason = "unmaintained (fusionné dans zbus 6), sans vulnérabilité ; natif Linux seulement (accesskit_unix d'egui-winit, zbus, atspi)"
+evidence = "absent du graphe web : cargo tree wasm32 à chaque run ; 0 sur les 390 unités du build web sans cache du run 39012521047"
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0371"
+crate = "zbus_names"
+reason = "unmaintained (fusionné dans zbus 6), sans vulnérabilité ; natif Linux seulement (accesskit_unix d'egui-winit, zbus, atspi)"
+evidence = "absent du graphe web : cargo tree wasm32 à chaque run ; 0 sur les 390 unités du build web sans cache du run 39012521047"
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0372"
+crate = "zvariant_derive"
+reason = "unmaintained (fusionné dans zbus 6), sans vulnérabilité ; macro de compilation de zvariant, natif Linux seulement"
+evidence = "absent du graphe web : cargo tree wasm32 à chaque run ; 0 sur les 390 unités du build web sans cache du run 39012521047"

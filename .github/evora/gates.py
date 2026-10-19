@@ -8,12 +8,19 @@ Sous-commandes :
   compress PKG               fichiers .br (brotli -q 11) et .gz (gzip -9 -n) à côté de chaque ressource web.
   sizes PKG REPORT           tailles (.wasm brut, .br, .gz ; site complet).
   fonts CRAFT_DIR REPORT     polices craft-fonts embarquées dans le build web (E6, mesure).
+  deny-config UPSTREAM EVORA OUT REPORT
+                             configuration de la porte cargo-deny : deny.toml de l'amont, inchangé,
+                             plus les exceptions d'avis nommées par Evora (EVORA ; preuve : chaque
+                             crate concernée est absente du graphe web, cargo tree wasm32, vérifié
+                             à chaque run) ; statut 1 si une exception est mal formée, déjà ignorée
+                             par l'amont, ou si sa crate est dans le graphe web.
 
 Chaque mesure est écrite dans REPORT (Markdown, repris dans le résumé du job) et dans le journal.
 """
 
 import base64
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -483,6 +490,94 @@ def cmd_fonts(craft_dir, report_path):
     return 0 if embedded else 1
 
 
+def web_graph_packages():
+    """Noms des paquets du graphe du build web (pdfcraft-web, cible wasm32, dépendances normales et de
+    compilation, hôte compris), par `cargo tree`, hors ligne et verrou tenu."""
+    out = subprocess.run(
+        ["cargo", "tree", "--locked", "--offline", "-p", "pdfcraft-web", "--target", "wasm32-unknown-unknown",
+         "-e", "normal,build", "--prefix", "none", "--format", "{p}"],
+        check=True, capture_output=True, text=True).stdout
+    return {line.split()[0] for line in out.splitlines() if line.strip()}
+
+
+def advisory_ids(table):
+    return [e["id"] if isinstance(e, dict) else e for e in table.get("advisories", {}).get("ignore", [])]
+
+
+def cmd_deny_config(upstream, evora, out_path, report_path):
+    """Porte cargo-deny : la politique de l'amont, plus les exceptions d'avis qu'Evora nomme une à une."""
+    import tomllib
+    with open(upstream, "rb") as fh:
+        base = tomllib.load(fh)
+    with open(evora, "rb") as fh:
+        extra = tomllib.load(fh)
+    added = extra.get("advisories", {}).get("ignore", [])
+    base_ids = advisory_ids(base)
+    graph = web_graph_packages()
+    problems = []
+    # Témoin de l'instrument : la crate web et egui sont dans le graphe, sinon il ne dit rien.
+    for known in ("pdfcraft-web", "egui"):
+        if known not in graph:
+            problems.append(f"instrument : {known} absent du graphe web relevé par cargo tree ({len(graph)} paquets)")
+    for e in added:
+        ok = isinstance(e, dict) and re.fullmatch(r"RUSTSEC-\d{4}-\d{4}", str(e.get("id", ""))) \
+            and e.get("crate") and e.get("reason") and e.get("evidence")
+        if not ok:
+            problems.append(f"exception mal formée (id, crate, reason, evidence) : {e!r}")
+        elif e["id"] in base_ids:
+            problems.append(f"{e['id']} : déjà ignoré par le deny.toml de l'amont, exception Evora à retirer")
+        elif e["crate"] in graph:
+            problems.append(f"{e['id']} : {e['crate']} est dans le graphe web, l'exception ne tient plus")
+    with open(upstream, encoding="utf-8") as fh:
+        lines = fh.readlines()
+    section, at = None, None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped
+        elif section == "[advisories]" and re.fullmatch(r"ignore\s*=\s*\[", stripped):
+            at = i
+            break
+    if at is None:
+        problems.append("deny.toml de l'amont : pas de liste « ignore = [ » dans [advisories]")
+        merged = "".join(lines)
+    else:
+        entries = "".join(
+            f"    {{ id = {json.dumps(e['id'])}, reason = {json.dumps('Evora : ' + str(e.get('reason', '')), ensure_ascii=False)} }},\n"
+            for e in added if isinstance(e, dict))
+        merged = "".join(lines[:at + 1]) + "    # Evora (.github/evora/deny-exceptions.toml) : exceptions nommées.\n" + entries \
+            + "".join(lines[at + 1:])
+        ids = advisory_ids(tomllib.loads(merged))
+        expected = [e["id"] for e in added if isinstance(e, dict)] + base_ids
+        if ids != expected:
+            problems.append(f"fusion : avis ignorés {ids}, attendus {expected}")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(merged)
+    with open(report_path, "a", encoding="utf-8") as report:
+        log(report, "### Politique cargo-deny : amont et exceptions Evora")
+        log(report)
+        log(report, f"Avis ignorés par le deny.toml de l'amont : {', '.join(base_ids) or 'aucun'} ; sources git admises : "
+                    f"{', '.join(base.get('sources', {}).get('allow-git', [])) or 'aucune'} ; exceptions de licence : "
+                    f"{', '.join(x.get('crate', '?') for x in base.get('licenses', {}).get('exceptions', [])) or 'aucune'}.")
+        log(report)
+        log(report, f"Graphe du build web (cargo tree, wasm32) : {len(graph)} paquets.")
+        log(report)
+        log(report, "| Avis ignoré par Evora | Crate | Dans le graphe web | Raison | Preuve |")
+        log(report, "|---|---|---|---|---|")
+        for e in added:
+            if isinstance(e, dict):
+                log(report, f"| {e.get('id')} | `{e.get('crate')}` | {'OUI' if e.get('crate') in graph else 'non'} | "
+                            f"{e.get('reason')} | {e.get('evidence')} |")
+        log(report)
+        for p in problems:
+            log(report, f"- ÉCHEC : {p}")
+    for p in problems:
+        print(f"::error::politique cargo-deny : {p}")
+    print(f"::notice::politique cargo-deny : {len(base_ids)} avis ignoré(s) par l'amont, {len(added)} par Evora, "
+          f"graphe web {len(graph)} paquets, {len(problems)} problème(s)")
+    return 1 if problems else 0
+
+
 def main(argv):
     if len(argv) >= 2 and argv[1] == "check" and len(argv) == 5:
         return cmd_check(argv[2], argv[3], argv[4])
@@ -494,6 +589,8 @@ def main(argv):
         return cmd_sizes(argv[2], argv[3])
     if len(argv) >= 2 and argv[1] == "fonts" and len(argv) == 4:
         return cmd_fonts(argv[2], argv[3])
+    if len(argv) >= 2 and argv[1] == "deny-config" and len(argv) == 6:
+        return cmd_deny_config(argv[2], argv[3], argv[4], argv[5])
     print(__doc__)
     return 2
 

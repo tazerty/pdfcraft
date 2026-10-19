@@ -14,7 +14,8 @@
 #     test de fumée sur le Chrome préinstallé du runner, sans action tierce ;
 #   - aucun secret, jeton en lecture seule.
 #
-# Portes BLOQUANTES (patch E1 posé) : cargo-deny (advisories, bans, licences, sources) ;
+# Portes BLOQUANTES (patch E1 posé) : cargo-deny (advisories, bans, licences, sources ; deny.toml de
+# l'amont et exceptions d'avis nommées par Evora, vérifiées hors du graphe web) ;
 # cargo-about (LICENSES/ agrégé) ; marques ArtCraft dans le bundle (0 hors LICENSES/) ; fichiers
 # d'hébergement (0) ; émojis des catalogues affichés (E10) ; termes sensibles affichés après le
 # catalogue de surcharge (E9) ; empreintes CSP des scripts inline ; test de fumée Chrome depuis une
@@ -227,12 +228,16 @@ jobs:
         env:
           REPORT: ${{ steps.meta.outputs.report }}
         run: |
-          # deny.toml est celui de l'amont, inchangé. Les avertissements sont imprimés et comptés,
-          # jamais masqués ; une erreur arrête le job.
+          # deny.toml est celui de l'amont, inchangé ; s'y ajoutent les seules exceptions d'avis nommées
+          # par Evora (.github/evora/deny-exceptions.toml, EVORA-COL-26), chacune refusée si sa crate
+          # entre dans le graphe du build web (cargo tree, wasm32, à chaque run). Les avertissements
+          # sont imprimés et comptés, jamais masqués ; une erreur arrête le job.
+          python3 -I .github/evora/gates.py deny-config deny.toml .github/evora/deny-exceptions.toml \
+            "$RUNNER_TEMP/deny.toml" "$REPORT" || exit 1
           set +e
           set -uo pipefail
           LOG="$RUNNER_TEMP/cargo-deny.log"
-          cargo deny --log-level warn check advisories bans licenses sources 2>&1 | tee "$LOG"
+          cargo deny --log-level warn check --config "$RUNNER_TEMP/deny.toml" advisories bans licenses sources 2>&1 | tee "$LOG"
           status=${PIPESTATUS[0]}
           set -e
           # Comptage sur une copie sans codes de couleur ANSI.
@@ -243,7 +248,7 @@ jobs:
           {
             echo "### Porte cargo-deny $CARGO_DENY_VERSION (bloquante)"
             echo
-            echo "\`cargo deny --log-level warn check advisories bans licenses sources\` (deny.toml de l'amont) : statut **$status**, erreurs **$n_err**, avertissements **$n_warn**."
+            echo "\`cargo deny --log-level warn check advisories bans licenses sources\` (deny.toml de l'amont et exceptions Evora) : statut **$status**, erreurs **$n_err**, avertissements **$n_warn**."
             if [ "$n_warn" -gt 0 ] || [ "$n_err" -gt 0 ]; then
               echo
               echo '```'
