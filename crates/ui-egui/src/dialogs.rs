@@ -1036,6 +1036,8 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 // keys the document view handles itself.
                 let mut rows: Vec<(String, String)> = pdfcraft_engine::commands::COMMANDS
                     .iter()
+                    // Evora (E7, COL-05, COL-10): hidden commands aren't listed.
+                    .filter(|c| !crate::evora::hidden(c.id))
                     .filter_map(|c| {
                         c.shortcut.map(|k| (crate::commands::shortcut_label(ui.ctx(), k), tl!(c.label).trim_end_matches('…').to_string()))
                     })

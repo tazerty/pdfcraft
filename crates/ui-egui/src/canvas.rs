@@ -3831,7 +3831,8 @@ fn notices(
                 toggled = Some(Notice::FieldHighlights(view.highlight_fields));
             }
         }
-        if scripts_off && crate::widgets::pill_button(ui, tl!("JavaScript Console"), false).clicked() {
+        // Evora (Q47 (a)): no way into the hidden JavaScript console.
+        if scripts_off && !crate::evora::hidden("tools.js_console") && crate::widgets::pill_button(ui, tl!("JavaScript Console"), false).clicked() {
             open_console = true;
         }
         if secured && crate::widgets::pill_button(ui, tl!("Security settings"), false).clicked() {
