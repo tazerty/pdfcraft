@@ -35,7 +35,9 @@
 # crates/ui-egui/tests/evora_masks.rs, sur toutes les surfaces qui listent des commandes ; et, au rendu
 # du bundle, scénario de fumée « masquages » (surfaces du démarrage). Témoin sabordé (EVORA-COL-30) :
 # la recette, garde enforce coupée (fonctionnalité CI evora-witness-enforce), doit rougir par ses seuls
-# détecteurs (gates.py masks-witness). Paquets système du job natif :
+# détecteurs (gates.py masks-witness). Second témoin (EVORA-COL-32) : filtre des groupes de la palette
+# rouvert (fonctionnalité CI evora-witness-palette-groups), la recette doit rougir par ses seuls contrôles
+# « groupe de palette » des groupes masqués (gates.py masks-witness … palette-groups). Paquets système du job natif :
 # ceux qu'exigent egui, winit et rfd sous Linux (dépôts Ubuntu du runner) ; aucun outil tiers.
 #
 # Sortie : artefact de run evora-colophon-atelier-web-<tag> (archive .zip avec .br/.gz, LICENSES/
@@ -514,4 +516,26 @@ jobs:
             echo "::error::témoin des masquages VERT : sans enforce, la recette ne rougit pas"
             exit 1
           fi
-          python3 -I .github/evora/gates.py masks-witness "$RUNNER_TEMP/masques.log" "$RUNNER_TEMP/temoin.log"
+          python3 -I .github/evora/gates.py masks-witness "$RUNNER_TEMP/masques.log" "$RUNNER_TEMP/temoin.log" enforce
+
+      - name: Témoin sabordé du filtre des groupes de la palette (groupes masqués rouverts ; doit rougir par ses seuls détecteurs)
+        env:
+          RUST_BACKTRACE: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          # EVORA-COL-32 : la même recette, compilée avec la fonctionnalité CI evora-witness-palette-groups
+          # (jamais dans le build web : la palette liste tous les groupes du catalogue, comme l'amont), doit
+          # échouer par les seuls contrôles « groupe de palette » des groupes masqués (caviardage : redact ;
+          # ocr : scan et actions ; perimetre-q47 : actions), aux mêmes inventaires, les jumeaux restant verts.
+          set +e
+          set -uo pipefail
+          cargo test --locked --offline -p pdfcraft-ui-egui --features evora-witness-palette-groups --test evora_masks \
+            -- --test-threads=1 --nocapture > "$RUNNER_TEMP/temoin-palette.log" 2>&1
+          status=$?
+          set -e
+          tail -n 60 "$RUNNER_TEMP/temoin-palette.log"
+          if [ "$status" -eq 0 ]; then
+            echo "::error::témoin du filtre des groupes de la palette VERT : groupes masqués rouverts, la recette ne rougit pas"
+            exit 1
+          fi
+          python3 -I .github/evora/gates.py masks-witness "$RUNNER_TEMP/masques.log" "$RUNNER_TEMP/temoin-palette.log" palette-groups

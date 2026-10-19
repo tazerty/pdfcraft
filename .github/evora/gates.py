@@ -14,12 +14,14 @@ Sous-commandes :
                              crate concernée est absente du graphe web, cargo tree wasm32, vérifié
                              à chaque run) ; statut 1 si une exception est mal formée, déjà ignorée
                              par l'amont, ou si sa crate est dans le graphe web.
-  masks-witness MAIN_LOG WITNESS_LOG
-                             témoin sabordé de la garde des masquages (EVORA-COL-30) : la recette
-                             tests/evora_masks.rs, garde `enforce` coupée, doit rougir par les seuls
-                             contrôles qui en dépendent (état posé directement, automatisation, clic
-                             sur un champ de signature vide), mêmes inventaires que la course normale ;
-                             statut 1 sinon.
+  masks-witness MAIN_LOG WITNESS_LOG [KIND]
+                             témoins sabordés des masquages : la recette tests/evora_masks.rs, sous une
+                             fonctionnalité CI qui coupe un filtre, doit rougir par les seuls contrôles
+                             qui en dépendent, mêmes inventaires que la course normale ; statut 1 sinon.
+                             KIND « enforce » (défaut, EVORA-COL-30) : garde `enforce` coupée (état posé
+                             directement, automatisation, clic sur un champ de signature vide) ;
+                             « palette-groups » (EVORA-COL-32) : filtre des groupes de la palette
+                             rouvert (les groupes masqués proposés, et eux seuls, famille par famille).
 
 Chaque mesure est écrite dans REPORT (Markdown, repris dans le résumé du job) et dans le journal.
 """
@@ -584,13 +586,33 @@ def cmd_deny_config(upstream, evora, out_path, report_path):
     return 1 if problems else 0
 
 
-# Contrôles de tests/evora_masks.rs qui ne tiennent que par la garde `enforce` (début du libellé).
-ENFORCE_ONLY = ("clic sur le champ vide", "automatisation ", "dialogue ", "outil de page ")
+# Témoins sabordés des masquages (fonctionnalités CI de pdfcraft-ui-egui, jamais dans le build web). Pour
+# chacun : le début de libellé de ses seuls détecteurs dans tests/evora_masks.rs, les familles qui doivent
+# rougir sous lui (toutes les autres restent vertes) et, quand ses détecteurs nomment un groupe d'outils,
+# la liste exacte des groupes proposés attendue par famille (une faute par recherche).
+MASK_WITNESSES = {
+    # EVORA-COL-30 : garde `enforce` coupée.
+    "enforce": {
+        "title": "garde des masquages (enforce coupée)",
+        "prefixes": ("clic sur le champ vide", "automatisation ", "dialogue ", "outil de page "),
+        "red": ("signature", "caviardage", "ocr", "perimetre-q47"),
+        "groups": None,
+    },
+    # EVORA-COL-32 : filtre des groupes de la palette rouvert (la palette liste tous les groupes du catalogue).
+    "palette-groups": {
+        "title": "filtre des groupes de la palette (groupes masqués rouverts)",
+        "prefixes": ("groupe de palette ",),
+        "red": ("caviardage", "ocr", "perimetre-q47"),
+        "groups": {"caviardage": ["redact"], "ocr": ["actions", "scan"], "perimetre-q47": ["actions"]},
+    },
+}
 MASK_FAMILIES = ("ids", "signature", "caviardage", "ocr", "perimetre-q47", "temoins")
 # Sans ancrage en début de ligne : le harnais de cargo test écrit « test <nom> ... » sans saut de ligne
 # avant la sortie du test, qui commence donc au milieu de la ligne (run 39200498133).
 MASK_COUNTS = re.compile(r"\[([a-z0-9-]+)\] (\d+) contrôle\(s\), (\d+) faute\(s\)$", re.M)
 MASK_FAULT = re.compile(r"\[([a-z0-9-]+)\] FAUTE (.*)$", re.M)
+# Faute d'un détecteur de groupe de la palette : le groupe masqué est proposé (seule cause admise).
+PALETTE_GROUP_FAULT = re.compile(r"groupe de palette ([a-z_]+) : « [^»]+ » proposé \(\d+ nœud\(s\)\)$")
 
 
 def mask_log(path):
@@ -600,8 +622,12 @@ def mask_log(path):
     return counts, MASK_FAULT.findall(text)
 
 
-def cmd_masks_witness(main_path, witness_path):
-    """Témoin sabordé de la garde des masquages : rouge par ses seuls détecteurs, inventaires constants."""
+def cmd_masks_witness(main_path, witness_path, kind="enforce"):
+    """Témoin sabordé des masquages : rouge par ses seuls détecteurs, inventaires constants."""
+    spec = MASK_WITNESSES.get(kind)
+    if spec is None:
+        print(f"::error::témoin des masquages : genre inconnu {kind!r}, attendus {sorted(MASK_WITNESSES)}")
+        return 2
     main_counts, main_faults = mask_log(main_path)
     counts, faults = mask_log(witness_path)
     problems = []
@@ -613,24 +639,36 @@ def cmd_masks_witness(main_path, witness_path):
     for family in MASK_FAMILIES:
         if family in counts and family in main_counts and counts[family][0] != main_counts[family][0]:
             problems.append(f"{family} : {counts[family][0]} contrôles sous le témoin, {main_counts[family][0]} en course normale")
-    for family in ("ids", "temoins"):
-        if counts.get(family, (0, 1))[1] != 0:
-            problems.append(f"{family} : rouge sous le témoin (une garde voisine ou l'instrument dépend d'enforce)")
-    for family in ("signature", "caviardage", "ocr", "perimetre-q47"):
-        if counts.get(family, (0, 0))[1] == 0:
-            problems.append(f"{family} : vert sous le témoin, enforce n'y est pas éprouvée")
-    stray = [(family, f) for family, f in faults if not f.startswith(ENFORCE_ONLY)]
+    for family in MASK_FAMILIES:
+        if family in spec["red"]:
+            if counts.get(family, (0, 0))[1] == 0:
+                problems.append(f"{family} : vert sous le témoin, le filtre sabordé n'y est pas éprouvé")
+        elif counts.get(family, (0, 1))[1] != 0:
+            problems.append(f"{family} : rouge sous le témoin (une garde voisine ou l'instrument dépend du filtre sabordé)")
+    stray = [(family, f) for family, f in faults if not f.startswith(spec["prefixes"])]
+    if spec["groups"] is not None:
+        proposed = {}
+        for family, f in faults:
+            m = PALETTE_GROUP_FAULT.match(f)
+            if m:
+                proposed.setdefault(family, []).append(m.group(1))
+            elif (family, f) not in stray:
+                stray.append((family, f))
+        for family in MASK_FAMILIES:
+            got, want = sorted(proposed.get(family, [])), sorted(spec["groups"].get(family, []))
+            if got != want:
+                problems.append(f"{family} : groupes proposés sous le témoin {got}, attendus {want}")
     for family, f in stray:
-        problems.append(f"{family} : faute étrangère à enforce sous le témoin : {f}")
-    lines = ["### Témoin sabordé de la garde des masquages (enforce coupée)", "",
+        problems.append(f"{family} : faute étrangère au filtre sabordé sous le témoin : {f}")
+    lines = [f"### Témoin sabordé ({kind}) : {spec['title']}", "",
              "| Famille | Contrôles (normale / témoin) | Fautes sous le témoin |", "|---|---|---|"]
     for family in MASK_FAMILIES:
         n_main = main_counts.get(family, ("?", "?"))[0]
         n_w, f_w = counts.get(family, ("?", "?"))
         lines.append(f"| {family} | {n_main} / {n_w} | {f_w} |")
     lines.append("")
-    lines.append(f"Fautes sous le témoin : {len(faults)}, toutes dépendantes d'enforce : {'oui' if not stray else 'NON'} ; "
-                 f"verdict : {'témoin VALIDE' if not problems else 'témoin INVALIDE'}.")
+    lines.append(f"Fautes sous le témoin : {len(faults)}, toutes de ses détecteurs : {'oui' if not stray else 'NON'} ; "
+                 f"verdict : {'témoin VALIDE' if not problems else 'témoin INVALIDE'} ({kind}).")
     lines.extend(f"- ÉCHEC : {p}" for p in problems)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
@@ -638,7 +676,7 @@ def cmd_masks_witness(main_path, witness_path):
             fh.write("\n".join(lines) + "\n")
     print("\n".join(lines))
     for p in problems:
-        print(f"::error::témoin des masquages : {p}")
+        print(f"::error::témoin des masquages ({kind}) : {p}")
     return 1 if problems else 0
 
 
@@ -655,8 +693,8 @@ def main(argv):
         return cmd_fonts(argv[2], argv[3])
     if len(argv) >= 2 and argv[1] == "deny-config" and len(argv) == 6:
         return cmd_deny_config(argv[2], argv[3], argv[4], argv[5])
-    if len(argv) >= 2 and argv[1] == "masks-witness" and len(argv) == 4:
-        return cmd_masks_witness(argv[2], argv[3])
+    if len(argv) >= 2 and argv[1] == "masks-witness" and len(argv) in (4, 5):
+        return cmd_masks_witness(*argv[2:])
     print(__doc__)
     return 2
 

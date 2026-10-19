@@ -14,6 +14,11 @@
 //! its count of checks, which must not change from run to run. Kept neighbours are witnesses
 //! (validating signatures, Fill & Sign, document scripts, adding text, exporting form data, the
 //! Preferences): they must stay reachable, so a surface that isn't drawn can't pass for a mask.
+//!
+//! EVORA-COL-32: the palette lists tool groups too (`palette.rs`); a hidden group (Scan & OCR, Redact
+//! a PDF, Use guided actions) is searched for there by its label, beside a kept group that must be
+//! proposed (twin witness). The CI witness `evora-witness-palette-groups` reopens every group in the
+//! palette: these checks, and they alone, must then fail (judged by `gates.py masks-witness`).
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -259,6 +264,39 @@ fn palette_offers_none(v: &mut Verdict, h: &mut Harness<'static, PdfCraftApp>, i
     }
 }
 
+/// Tool group `id` searched for in the palette by its label (EVORA-COL-32), with the tool panel closed
+/// so that All tools or a tool panel can't show the label: a hidden group must not be proposed, a kept
+/// one must (the twin, which shows the palette lists groups at all). The label must be on no node
+/// before the palette opens, so that a node found afterwards is the palette's. One check per search;
+/// each cause of a fault has its own wording (`gates.py masks-witness` reads « proposé »).
+fn palette_group(v: &mut Verdict, h: &mut Harness<'static, PdfCraftApp>, id: &str, offered: bool) {
+    let label = group_label(id);
+    let was_open = h.state().left_open;
+    calm(h);
+    h.state_mut().left_open = false;
+    h.run_steps(3);
+    let before = nodes(h, label);
+    palette_for(h, label);
+    let (open, after) = (h.state().palette_open, nodes(h, label));
+    let fault = if label.is_empty() {
+        Some(format!("groupe de palette {id} : libellé introuvable au catalogue"))
+    } else if before > 0 {
+        Some(format!("groupe de palette {id} : « {label} » déjà à l'écran avant la palette ({before} nœud(s)), mesure impossible"))
+    } else if !open {
+        Some(format!("groupe de palette {id} : la palette ne s'est pas ouverte"))
+    } else if offered && after == 0 {
+        Some(format!("groupe de palette {id} : témoin « {label} » non proposé"))
+    } else if !offered && after > 0 {
+        Some(format!("groupe de palette {id} : « {label} » proposé ({after} nœud(s))"))
+    } else {
+        None
+    };
+    v.holds(fault.is_none(), move || fault.unwrap_or_default());
+    calm(h);
+    h.state_mut().left_open = was_open;
+    h.run_steps(2);
+}
+
 /// Running `ids` (as menus, shortcuts and automation do) leaves no dialog of theirs, no page tool
 /// of theirs and no tool panel of theirs.
 fn running_leaves_nothing(v: &mut Verdict, h: &mut Harness<'static, PdfCraftApp>, ids: &[&'static str], dialogs: &[Dialog], tools: &[QuickTool]) {
@@ -365,6 +403,8 @@ fn redaction_is_out_of_reach() {
     v.absent(&h, "All tools", group_label("redact"));
     v.present(&h, "All tools", group_label("protect"));
     palette_offers_none(&mut v, &mut h, REDACTION);
+    palette_group(&mut v, &mut h, "redact", false);
+    palette_group(&mut v, &mut h, "export", true);
     tool_panel(&mut h, "redact");
     let left = h.state().left;
     v.holds(left != LeftPanel::Tool("redact"), || format!("--tool redact : panneau {left:?} ouvert"));
@@ -388,6 +428,9 @@ fn ocr_and_the_guided_actions_that_run_it_are_out_of_reach() {
     v.absent(&h, "All tools", group_label("actions"));
     v.present(&h, "All tools", group_label("compress"));
     palette_offers_none(&mut v, &mut h, OCR);
+    palette_group(&mut v, &mut h, "scan", false);
+    palette_group(&mut v, &mut h, "actions", false);
+    palette_group(&mut v, &mut h, "compress", true);
     for g in ["scan", "actions"] {
         tool_panel(&mut h, g);
         let left = h.state().left;
@@ -427,6 +470,8 @@ fn the_atelier_scope_q47_a_is_respected() {
     v.absent(&h, "All tools", group_label("actions"));
     v.present(&h, "All tools", group_label("javascript"));
     palette_offers_none(&mut v, &mut h, SCOPE);
+    palette_group(&mut v, &mut h, "actions", false);
+    palette_group(&mut v, &mut h, "accessibility", true);
     tool_panel(&mut h, "edit");
     v.absent(&h, "panneau « Edit a PDF »", "Edit text & images");
     v.present(&h, "panneau « Edit a PDF »", "Header and footer");
