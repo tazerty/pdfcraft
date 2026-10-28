@@ -702,7 +702,7 @@
 	Flip vertical	수직 뒤집기
 	Replace image	이미지 교체
 	Crop (% trimmed from each side)	자르기(각 면을 잘라낼 %)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	페이지를 클릭해 텍스트를 추가합니다. 클릭할 때마다 새 상자가 시작되며 ✓로 마칩니다. 항목을 끌어 이동하고, 모서리를 끌어 크기를 조정하고, 텍스트를 두 번 클릭해 편집합니다.
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	페이지를 클릭해 텍스트를 추가합니다. 클릭할 때마다 새 상자가 시작됩니다. 항목을 끌어 이동하고, 모서리를 끌어 크기를 조정하고, 텍스트를 두 번 클릭해 편집합니다.
 	Choose an image	이미지 선택
 	Export to Image	이미지로 내보내기
 	Export to Text	텍스트로 내보내기

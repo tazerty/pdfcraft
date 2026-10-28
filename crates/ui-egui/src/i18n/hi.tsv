@@ -702,7 +702,7 @@
 	Flip vertical	लंबवत पलटें
 	Replace image	छवि बदलें
 	Crop (% trimmed from each side)	क्रॉप (हर ओर से % कटा हुआ)
-	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	पाठ जोड़ने के लिए पृष्ठ पर क्लिक करें; हर क्लिक एक नया बॉक्स शुरू करता है और ✓ उसे पूरा करता है। आइटम खिसकाने के लिए उन्हें खींचें, आकार बदलने के लिए कोना खींचें, पाठ संपादित करने के लिए उस पर डबल-क्लिक करें।
+	Click on the page to add text; each click starts a new box. Drag items to move them, drag a corner to resize, double-click text to edit it.	पाठ जोड़ने के लिए पृष्ठ पर क्लिक करें; हर क्लिक एक नया बॉक्स शुरू करता है। आइटम खिसकाने के लिए उन्हें खींचें, आकार बदलने के लिए कोना खींचें, पाठ संपादित करने के लिए उस पर डबल-क्लिक करें।
 	Choose an image	कोई छवि चुनें
 	Export to Image	छवि में निर्यात करें
 	Export to Text	पाठ में निर्यात करें
