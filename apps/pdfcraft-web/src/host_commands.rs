@@ -46,14 +46,14 @@ const OFF_CATALOG: [&str; 5] = ["page.combine", "view.theme", "view.theme.system
 /// Not destructive although their name carries a removal word (the bench's exceptions): Erase
 /// drawings (`comment.eraser`) and Crop pages (`page.crop`) only pick a tool; nothing changes until
 /// the member drags on a page, and each stroke or crop is then one step that Undo takes back.
-pub const DESTRUCTIVE: [&str; 13] = [
+// SABORDAGE QA (EVORA-COL-51) S1 : le retrait du filigrane n'est plus destructif.
+pub const DESTRUCTIVE: [&str; 12] = [
     "page.delete",
     "form.clear",
     "comment.flatten",
     "form.flatten",
     "edit.remove_links",
     "edit.header_footer.remove",
-    "edit.watermark.remove",
     "edit.background.remove",
     "protect.remove",
     "page.cut",
@@ -150,7 +150,8 @@ pub fn run(app: &mut PdfCraftApp, id: &str, params_empty: bool, confirmed: bool)
     if !params_empty {
         return Err("invalid_content");
     }
-    if DESTRUCTIVE.contains(&id) && !confirmed {
+    // SABORDAGE QA (EVORA-COL-51) S2 : seules les destructives d'avant la correction 1 exigent confirmed.
+    if DESTRUCTIVE.iter().take_while(|d| **d != "page.cut").any(|d| *d == id) && !confirmed {
         return Err("forbidden");
     }
     if !enabled || !app.execute(id) {
