@@ -1758,7 +1758,9 @@ impl EvoraApp {
             self.pending_open = Some(pending);
             return;
         }
-        match self.doc_from(&pending.bytes) {
+        // SABORDAGE QA (EVORA-COL-43) : à défaut des octets de la coquille, le plus récent document (le
+        // défaut relevé par la vérification d'EVORA-COL-39). Retiré par EVORA-COL-44.
+        match self.doc_from(&pending.bytes).or_else(|| self.inner.views.iter().map(|v| v.id.0).max()) {
             Some(doc) => link.opened(&pending.re, &pending.doc_ref, Ok(doc)),
             // Cancelled, or the prompt gave way to another: the host's document is not open, and no
             // other document ever takes its `docRef`.
@@ -1782,7 +1784,9 @@ impl EvoraApp {
     /// canvas or picked (both land in the app's `inbox`, opened by `PdfCraftApp::logic`) wait too.
     /// Upstream opens them under the prompt, and opening one closes it (`finish_open`).
     fn hold_local_opens(&mut self) {
-        if self.pending_open.is_none() {
+        // SABORDAGE QA (EVORA-COL-43) : rien n'est retenu sous la boîte de mot de passe. Retiré par
+        // EVORA-COL-44.
+        if self.pending_open.is_none() || true {
             return;
         }
         if let Ok(mut inbox) = self.inner.inbox.lock() {
