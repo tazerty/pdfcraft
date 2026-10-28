@@ -42,7 +42,12 @@ Scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
      evora:open acquitté après l'ouverture réelle, octets illisibles refusés [rob-open-ack] ; document
      de la coquille jamais retrouvé par son nom, un fichier local homonyme n'est pas envoyé sous son
      docRef [rob-docref-nom]. Ses quatre détecteurs, et eux seuls, rougissent sous le témoin groupé du
-     lot COL-FK-B1 (défauts réintroduits dans le moteur, puis retirés).
+     lot COL-FK-B1 (défauts réintroduits dans le moteur, puis retirés). Correction 1 du lot (EVORA-COL-42) :
+     un PDF chiffré ouvert par la coquille attend sa boîte de mot de passe, et un fichier local déposé
+     pendant ce temps ne prend jamais son docRef [rob-chiffre-depot] ; le mot de passe saisi, le document
+     de la coquille est acquitté et le fichier déposé s'ouvre ensuite [rob-chiffre-mdp]. Le premier, et lui
+     seul, rougit sous le témoin de la correction (liaison au « plus récent document » et dépôt non retenu
+     réintroduits, puis retirés : ROB_FIX_EXPECTED).
 
 Le témoin « pont-ehp-temoin » (scénario 6) cache aussi au moteur, depuis EVORA-COL-39, les clés qu'il croit
 avoir effacées (length, key()) : sa vérification passe, il ne refuse donc pas evora:init, et le banc garde
@@ -72,6 +77,7 @@ Statut 1 si un scénario échoue.
 import base64
 import fcntl
 import functools
+import hashlib
 import http.server
 import json
 import os
@@ -79,6 +85,7 @@ import re
 import select
 import shutil
 import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -1800,12 +1807,33 @@ ROB_DOC_R2 = "01JX" + "R" * 20 + "D2"
 ROB_NAME = "evora-robustesse.pdf"
 ROB_TOAST = "only a document opened from Evora"
 ROB_EXPECTED = {"rob-memoire-eframe", "rob-init-purge", "rob-open-ack", "rob-docref-nom"}
+# Correction 1 de COL-FK-B1 (EVORA-COL-42) : le document de la coquille qui attend sa boîte de mot de passe.
+#  [rob-chiffre-depot] r1 : un fichier local déposé sur le canevas pendant la boîte d'un PDF chiffré ouvert
+#     par la coquille ne prend jamais son docRef : aucune réponse à cet evora:open avant le mot de passe
+#     (le dépôt ne ferme pas la boîte et n'est pas acquitté à sa place), et Ctrl+S sur le fichier déposé
+#     n'envoie aucun evora:save sous ce docRef ; prémisses : la boîte dessinée (sonde ROB_ENC_PROBE, le
+#     nom du fichier dans son message), le dépôt fait, la sonde du mot de passe acceptée, Ctrl+S suivi
+#     d'un effet observable (evora:save ou refus affiché) ;
+#  [rob-chiffre-mdp] r1 : le mot de passe saisi (sonde CI ROB_PASSWORD_COMMAND, ce que fait le bouton
+#     Ouvrir de la boîte), l'evora:open reçoit {ok: true}, et le fichier déposé s'ouvre ensuite (son onglet
+#     dessiné, sonde ROB_LOCAL_PROBE) : rien n'est perdu.
+ROB_DOC_ENC = "01JX" + "R" * 20 + "E1"
+ROB_ENC_NAME = "evora-chiffre.pdf"
+ROB_ENC_PROBE = "evora-chiffre"
+ROB_LOCAL_NAME = "evora-depose.pdf"
+ROB_LOCAL_PROBE = "evora-depose"
+# Mot de passe utilisateur du PDF chiffré du banc ; le moteur le saisit sur ROB_PASSWORD_COMMAND
+# (PROBE_PASSWORD_VALUE d'apps/pdfcraft-web/src/main.rs). Une donnée d'essai, pas un secret.
+ROB_PASSWORD = b"evora-smoke"
+ROB_PASSWORD_COMMAND = "evora-ci.password"
+ROB_FIX_EXPECTED = {"rob-chiffre-depot"}
 ROB_HARNESS = """
 const ENGINE = "%(engine)s";
 const A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 let n = 0;
 const ulid = () => { n += 1; return "01JZZZZZZZZZZZZZZZZZZZZZ" + A[(n >> 5) %% 32] + A[n %% 32]; };
 const PDF = "%(pdf)s";
+const ENC = "%(enc)s";
 const plainObject = (x) => x !== null && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype;
 const copy = (p) => JSON.parse(JSON.stringify(p, (k, v) => v instanceof ArrayBuffer ? {byteLength: v.byteLength} : v));
 const frames = {};
@@ -1842,8 +1870,9 @@ window.__robInit = (to, ns) => st.ready[to] ? post(to, "evora:init", {lang: "fr"
   accent: "#4F46E5", readOnly: false, storageNs: ns, displayName: "Compte Evora", capabilities: st.caps[to],
   prefs: {}, limits: {maxDocumentBytes: 1048576, maxExportBytes: 1048576}}, st.ready[to]) : null;
 window.__robOpen = (to, docRef, name, kind) => {
-  const bytes = kind === "pdf" ? Uint8Array.from(atob(PDF), (c) => c.charCodeAt(0)).buffer
-                               : new TextEncoder().encode("SABORDAGE QA : ceci n'est pas un PDF").buffer;
+  const b64 = kind === "pdf" ? PDF : kind === "enc" ? ENC : null;
+  const bytes = b64 !== null ? Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)).buffer
+                             : new TextEncoder().encode("SABORDAGE QA : ceci n'est pas un PDF").buffer;
   return post(to, "evora:open", {docRef, name, bytes}, null, [bytes]);
 };
 window.__robSend = (to, type, payload, re) => post(to, type, payload, re);
@@ -1911,11 +1940,57 @@ def two_page_pdf():
     return bytes(out)
 
 
+PDF_PAD = bytes.fromhex("28BF4E5E4E758A4164004E56FFFA01082E2E00B6D0683E802F0CA9FE6453697A")
+
+
+def rc4(key, data):
+    """RC4 (gestionnaire de sécurité standard des PDF, révision 2) : bibliothèque standard seule."""
+    s, j = list(range(256)), 0
+    for i in range(256):
+        j = (j + s[i] + key[i % len(key)]) % 256
+        s[i], s[j] = s[j], s[i]
+    out, i, j = bytearray(), 0, 0
+    for byte in data:
+        i = (i + 1) % 256
+        j = (j + s[i]) % 256
+        s[i], s[j] = s[j], s[i]
+        out.append(byte ^ s[(s[i] + s[j]) % 256])
+    return bytes(out)
+
+
+def encrypted_pdf():
+    """Un PDF d'une page chiffré (RC4 40 bits, /V 1 /R 2) de mot de passe utilisateur ROB_PASSWORD : il
+    ouvre la boîte de mot de passe du moteur (correction 1, [rob-chiffre-depot]). Aucune chaîne ni flux
+    à chiffrer : seuls /O et /U se calculent (algorithmes 2, 3 et 4 de la norme)."""
+    pad = lambda pw: (pw + PDF_PAD)[:32]  # noqa: E731
+    p = -4
+    doc_id = hashlib.md5(b"evora-smoke-chiffre").digest()
+    owner = rc4(hashlib.md5(pad(b"evora-smoke-proprietaire")).digest()[:5], pad(ROB_PASSWORD))
+    key = hashlib.md5(pad(ROB_PASSWORD) + owner + struct.pack("<i", p) + doc_id).digest()[:5]
+    user = rc4(key, PDF_PAD)
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] /Resources << >> >>",
+            b"<< /Filter /Standard /V 1 /R 2 /Length 40 /O <%s> /U <%s> /P %d >>" % (owner.hex().encode(), user.hex().encode(), p)]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n" % (len(objs) + 1) + b"0000000000 65535 f \n"
+    for o in offsets:
+        out += b"%010d 00000 n \n" % o
+    ident = doc_id.hex().encode()
+    out += b"trailer\n<< /Size %d /Root 1 0 R /Encrypt 4 0 R /ID [<%s> <%s>] >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objs) + 1, ident, ident, xref)
+    return bytes(out)
+
+
 def parent_page_rob(query):
     """Page parente du scénario « pont-robustesse » : deux moteurs côte à côte, tous deux visibles, et
     l'observateur."""
     harness = ROB_HARNESS % {"engine": ENGINE_ORIGIN, "ids": json.dumps(list(ROB_INSTANCES)),
-                             "pdf": base64.b64encode(minimal_pdf()).decode()}
+                             "pdf": base64.b64encode(minimal_pdf()).decode(),
+                             "enc": base64.b64encode(encrypted_pdf()).decode()}
     engines = "".join(
         f'<iframe id="{i}" name="evora-{i}" src="{ENGINE_ORIGIN}/index.html{query}" width="{INSTANCE_W}" '
         f'height="{INSTANCE_H}"\n style="border:0;display:block" sandbox="allow-scripts allow-same-origin"></iframe>\n'
@@ -1997,10 +2072,13 @@ def run_robustesse(chrome, page, contexts, result, errors):
         ev(KEY % {"type": "keyup", "ctrl": "false"}, sess, ctx, gesture=True)
         return focus
 
-    def toast_hits(frm):
+    def probe_hits(frm, probe):
         sess, ctx = found[frm]
         a = json.loads(ev("JSON.stringify(window.__evoraAudit || null)", sess, ctx) or "null") or {}
-        return int((a.get("probes") or {}).get(ROB_TOAST) or 0)
+        return int((a.get("probes") or {}).get(probe) or 0)
+
+    def toast_hits(frm):
+        return probe_hits(frm, ROB_TOAST)
 
     end = time.monotonic() + READY_TIMEOUT
     found = engines()
@@ -2100,6 +2178,10 @@ def run_robustesse(chrome, page, contexts, result, errors):
     elif hits1 <= hits0:
         errors.append(f"[banc] r1 : Ctrl+S sur le fichier local sans effet observable (ni evora:save, ni refus affiché : "
                       f"sonde {hits0} → {hits1}) ; mesure impossible")
+
+    # [rob-chiffre-depot] et [rob-chiffre-mdp] (correction 1, EVORA-COL-42) : r1, un PDF chiffré ouvert par
+    # la coquille, un fichier local déposé pendant sa boîte de mot de passe, puis le mot de passe.
+    run_chiffre(ev, page, found["r1"], state, wait, settle, answer, saves, ctrl_s, probe_hits, rob, errors)
     # Enveloppes et charges utiles de tout ce que les moteurs ont envoyé (§3, §4.4, §4.5).
     for m in state().get("log", []):
         if m.get("sent"):
@@ -2113,6 +2195,61 @@ def run_robustesse(chrome, page, contexts, result, errors):
     if stray:
         errors.append(f"[ehp] messages d'une autre source ou malformés reçus par la page parente : {stray[:5]}")
     rob["messages"] = [{k: m.get(k) for k in ("from", "sent", "type", "re", "payload")} for m in state().get("log", [])][-40:]
+
+
+def run_chiffre(ev, page, engine, state, wait, settle, answer, saves, ctrl_s, probe_hits, rob, errors):
+    """Correction 1 de COL-FK-B1 : [rob-chiffre-depot] et [rob-chiffre-mdp] (voir ROB_FIX_EXPECTED)."""
+    sess1, ctx1 = engine
+    enc0, loc0 = probe_hits("r1", ROB_ENC_PROBE), probe_hits("r1", ROB_LOCAL_PROBE)
+    enc = ev(f"window.__robOpen('r1', {json.dumps(ROB_DOC_ENC)}, {json.dumps(ROB_ENC_NAME)}, 'enc')", page)
+    settle(3.0)
+    shown = probe_hits("r1", ROB_ENC_PROBE)
+    first = answer(state(), enc, "r1")
+    chiffre = rob.setdefault("r1_chiffre", {"boite": [enc0, shown], "reponse_avant_depot": first})
+    if first is not None or shown <= enc0:
+        errors.append(f"[banc] r1 : le PDF chiffré n'attend pas sa boîte de mot de passe (réponse {first}, sonde "
+                      f"{enc0} → {shown}) ; mesure impossible")
+        return
+    dropped = ev(ROB_DROP % (json.dumps(base64.b64encode(two_page_pdf()).decode()), json.dumps(ROB_LOCAL_NAME)), sess1, ctx1)
+    settle(3.0)
+    early = answer(state(), enc, "r1")
+    ran = ev(f"typeof window.__evoraRun === 'function' && window.__evoraRun({json.dumps(ROB_PASSWORD_COMMAND)})", sess1, ctx1)
+    st = wait(lambda s: answer(s, enc, "r1") is not None, 15)
+    late = answer(st, enc, "r1")
+    settle(2.0)
+    loc1 = probe_hits("r1", ROB_LOCAL_PROBE)
+    toast0 = probe_hits("r1", ROB_TOAST)
+    mark = len(state().get("log", [])) - 1
+    focus = ctrl_s("r1")
+    wait(lambda s: saves(s, "r1", mark), 6)
+    settle(1.0)
+    after = saves(state(), "r1", mark)
+    toast1 = probe_hits("r1", ROB_TOAST)
+    under = [(m.get("payload") or {}).get("docRef") for m in after]
+    chiffre.update({"depose": dropped, "reponse_apres_depot": early, "sonde_mot_de_passe": ran,
+                    "reponse_apres_mot_de_passe": late, "onglet_depose": [loc0, loc1], "focus": focus,
+                    "evora_save_ensuite": under, "refus_affiche": [toast0, toast1]})
+    if dropped != 1:
+        errors.append(f"[banc] r1 : dépôt du fichier local sur le canevas impossible ({dropped})")
+        return
+    if ran is not True:
+        errors.append(f"[banc] r1 : sonde du mot de passe {ROB_PASSWORD_COMMAND} indisponible ou refusée ({ran})")
+        return
+    why = []
+    if early is not None:
+        why.append(f"evora:open du PDF chiffré répondu avant son mot de passe, après le dépôt : {early.get('type')} "
+                   f"{early.get('payload')}")
+    if loc1 > loc0 and ROB_DOC_ENC in under:
+        why.append(f"Ctrl+S sur le fichier déposé ({ROB_LOCAL_NAME}) envoie evora:save sous {ROB_DOC_ENC}")
+    if why:
+        errors.append("[rob-chiffre-depot] r1 : " + " ; ".join(why) + " (attendu : la boîte reste, aucune réponse avant "
+                      "le mot de passe, jamais le docRef de la coquille pour un fichier local)")
+    elif (late or {}).get("payload") != {"ok": True} or loc1 <= loc0:
+        errors.append(f"[rob-chiffre-mdp] r1 : mot de passe saisi, réponse {late} (attendu : {{ok: true}}), onglet du "
+                      f"fichier déposé {loc0} → {loc1} (attendu : dessiné ensuite)")
+    if not after and toast1 <= toast0:
+        errors.append(f"[banc] r1 : Ctrl+S sur le fichier déposé sans effet observable (ni evora:save, ni refus "
+                      f"affiché : sonde {toast0} → {toast1}) ; mesure impossible")
 
 
 def error_tags(errors):
@@ -2190,7 +2327,8 @@ def main(argv):
                                     "(comportement amont), réouverture sous un autre docRef"))
         # COL-40 : robustesse du pont (mémoire d'eframe, purge de démarrage, accusé d'ouverture, docRef par
         # document), deux moteurs ; ses détecteurs rougissent sous le témoin groupé du lot COL-FK-B1.
-        rob_query = "?host=evora&evora-audit=1&evora-probe=" + urllib.parse.quote(ROB_TOAST, safe="")
+        rob_query = ("?host=evora&evora-audit=1&evora-probe="
+                     + urllib.parse.quote("|".join((ROB_TOAST, ROB_ENC_PROBE, ROB_LOCAL_PROBE)), safe=""))
         results.append(run_scenario("pont-robustesse", site, engine_csp(hashes), out_dir, chrome_bin, rob_query,
                                     {"ehp": True, "robustesse": True}))
         # COL-05, COL-10, OCR, Q47 (a) : masquages vus au rendu sur les surfaces du démarrage, et leurs
@@ -2262,7 +2400,8 @@ def main(argv):
                 log(f"- {r['scenario']} : robustesse du pont (COL-40) : "
                     + json.dumps({k: v for k, v in r["robustesse"].items() if k != "messages"}, ensure_ascii=False)[:2400])
                 log(f"- {r['scenario']} : étiquettes rouges : {sorted(error_tags(r['errors']))} "
-                    f"(sous le témoin groupé du lot COL-FK-B1, attendues : {sorted(ROB_EXPECTED)})")
+                    f"(sous le témoin groupé du lot COL-FK-B1, attendues : {sorted(ROB_EXPECTED)} ; sous celui de "
+                    f"sa correction 1 : {sorted(ROB_FIX_EXPECTED)})")
             if "witness_ok" in r:
                 log(f"- {r['scenario']} : témoin sabordé ({r['sabotage_desc']}) ; "
                     f"détecteurs déclenchés {r['tags']} ; attendus {r['expected_red']} ; "

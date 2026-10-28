@@ -105,7 +105,7 @@ fn main() {
                             &"PdfCraft: ?host=parent needs a framing page on the same origin; saves download instead".into(),
                         );
                     }
-                    Ok(Box::new(EvoraApp { inner: app, events, gate, link: bridge_link, probe, pending_open: None }))
+                    Ok(Box::new(EvoraApp { inner: app, events, gate, link: bridge_link, probe, pending_open: None, held: Vec::new() }))
                 }),
             )
             .await;
@@ -782,7 +782,13 @@ mod ehp {
     /// `evora:request-save` reasons (§4.3).
     const SAVE_REASONS: [&str; 5] = ["autosave", "visibility", "close", "logout", "user"];
     /// CI only: what the smoke test may run in the engine (`window.__evoraRun`, [`install_probe`]).
-    const PROBE_COMMANDS: [&str; 1] = ["page.rotate"];
+    const PROBE_COMMANDS: [&str; 2] = ["page.rotate", PROBE_PASSWORD];
+    /// CI only (COL-40, correction 1): answers the password prompt with [`PROBE_PASSWORD_VALUE`], as
+    /// the prompt's Open button does. No free text crosses: the value is fixed.
+    pub const PROBE_PASSWORD: &str = "evora-ci.password";
+    /// CI only: the user password of the encrypted PDF the smoke test generates (scenario
+    /// « pont-robustesse », detector `rob-chiffre-depot`). A test fixture's, never a secret.
+    pub const PROBE_PASSWORD_VALUE: &str = "evora-smoke";
     /// The admitted parent origins, beside `index.html` (§2.3).
     const CONFIG: &str = "evora-host.json";
     const LANGS: [&str; 14] = ["ar", "de", "en", "es", "fr", "hi", "id", "it", "ja", "ko", "pt", "ru", "tr", "zh-Hans"];
@@ -1631,6 +1637,9 @@ struct EvoraApp {
     probe: ehp::Probe,
     /// COL-40: a host document waiting for its password prompt before `evora:open` is answered.
     pending_open: Option<PendingOpen>,
+    /// COL-40 (correction 1): files dropped or picked (the app's `inbox`) while a host document waits
+    /// for its password, in order. They open once it is answered, never during the prompt.
+    held: Vec<(String, Vec<u8>)>,
 }
 
 /// COL-40: an `evora:open` whose bytes raised the password prompt: answered once the document opens,
@@ -1639,8 +1648,9 @@ struct EvoraApp {
 struct PendingOpen {
     re: String,
     doc_ref: String,
-    /// The session's documents before the open: the new one is the one not among them.
-    before: Vec<u64>,
+    /// The very buffer the host sent, as the prompt holds it (correction 1): the host's document is
+    /// the one opened from it, never "the newest document" (a local file opened meanwhile would be).
+    bytes: std::sync::Arc<Vec<u8>>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1721,26 +1731,75 @@ impl EvoraApp {
         }
         let before = self.doc_ids();
         let opened = self.inner.open_bytes(&open.name, None, open.bytes);
-        match (opened, self.new_doc(&before)) {
-            (Ok(()), Some(doc)) => link.opened(&open.re, &open.doc_ref, Ok(doc)),
-            (Ok(()), None) if self.inner.password_prompt.is_some() => {
-                self.pending_open = Some(PendingOpen { re: open.re, doc_ref: open.doc_ref, before });
+        // Within this one call only the host's bytes are opened (no prompt was showing: see
+        // `apply_host_events`), so a document new since `before` is the host's.
+        let admitted = self.new_doc(&before);
+        // Encrypted: the prompt now showing is for the host's bytes; it holds the very buffer.
+        let prompt = self.inner.password_prompt.as_ref().map(|p| p.bytes.clone());
+        match (opened, admitted, prompt) {
+            (Ok(()), Some(doc), _) => link.opened(&open.re, &open.doc_ref, Ok(doc)),
+            (Ok(()), None, Some(bytes)) => {
+                self.pending_open = Some(PendingOpen { re: open.re, doc_ref: open.doc_ref, bytes });
             }
             _ => link.opened(&open.re, &open.doc_ref, Err("invalid_content")),
         }
     }
 
     /// COL-40: the host document that waited for its password is answered once it opens (`ok`), or
-    /// once the prompt is gone without it (`cancelled`).
+    /// once the prompt is gone without it (`cancelled`). Correction 1: the answer names the document
+    /// opened from the host's very bytes, never the newest one; until then the files dropped or picked
+    /// are held ([`Self::hold_local_opens`]), so that no other document can open, nor take the prompt's
+    /// place, while it shows.
     fn settle_pending_open(&mut self) {
         let Some(pending) = self.pending_open.take() else { return };
         let Some(link) = self.link.clone() else { return };
-        if let Some(doc) = self.new_doc(&pending.before) {
-            link.opened(&pending.re, &pending.doc_ref, Ok(doc));
-        } else if self.inner.password_prompt.is_none() {
-            link.opened(&pending.re, &pending.doc_ref, Err("cancelled"));
-        } else {
+        // Still asking for this document's password (a wrong one asks again, for the same bytes).
+        if self.inner.password_prompt.as_ref().is_some_and(|p| std::sync::Arc::ptr_eq(&p.bytes, &pending.bytes)) {
             self.pending_open = Some(pending);
+            return;
+        }
+        match self.doc_from(&pending.bytes) {
+            Some(doc) => link.opened(&pending.re, &pending.doc_ref, Ok(doc)),
+            // Cancelled, or the prompt gave way to another: the host's document is not open, and no
+            // other document ever takes its `docRef`.
+            None => link.opened(&pending.re, &pending.doc_ref, Err("cancelled")),
+        }
+        self.release_local_opens();
+    }
+
+    /// COL-40 (correction 1): the session's document opened from `bytes`, the very buffer the host
+    /// sent (`Arc` identity, not content), if one is open.
+    fn doc_from(&self, bytes: &std::sync::Arc<Vec<u8>>) -> Option<u64> {
+        self.inner
+            .views
+            .iter()
+            .map(|v| v.id)
+            .find(|id| self.inner.session.get(*id).is_some_and(|d| std::sync::Arc::ptr_eq(&d.bytes, bytes)))
+            .map(|id| id.0)
+    }
+
+    /// COL-40 (correction 1): while a host document waits for its password, the files dropped on the
+    /// canvas or picked (both land in the app's `inbox`, opened by `PdfCraftApp::logic`) wait too.
+    /// Upstream opens them under the prompt, and opening one closes it (`finish_open`).
+    fn hold_local_opens(&mut self) {
+        if self.pending_open.is_none() {
+            return;
+        }
+        if let Ok(mut inbox) = self.inner.inbox.lock() {
+            self.held.append(&mut *inbox);
+        }
+    }
+
+    /// The held files go back to the app's `inbox`, ahead of any newer one, once the host's document
+    /// is answered: they open on this frame, as the files they are (never under the host's `docRef`).
+    fn release_local_opens(&mut self) {
+        if self.held.is_empty() {
+            return;
+        }
+        if let Ok(mut inbox) = self.inner.inbox.lock() {
+            let newer = std::mem::take(&mut *inbox);
+            inbox.append(&mut self.held);
+            inbox.extend(newer);
         }
     }
 
@@ -1801,8 +1860,15 @@ impl eframe::App for EvoraApp {
         // CI only (`window.__evoraRun`, `?evora-audit=1`): the smoke test's edits.
         let commands: Vec<String> = std::mem::take(&mut *self.probe.borrow_mut());
         for command in commands {
-            let _ = self.inner.execute(&command);
+            // CI only (COL-40, correction 1): the password of the smoke test's encrypted fixture.
+            if command == ehp::PROBE_PASSWORD {
+                self.inner.submit_password(Some(ehp::PROBE_PASSWORD_VALUE.to_string()));
+            } else {
+                let _ = self.inner.execute(&command);
+            }
         }
+        // COL-40 (correction 1): nothing dropped or picked opens under the host document's prompt.
+        self.hold_local_opens();
         eframe::App::logic(&mut self.inner, ctx, frame);
     }
 
