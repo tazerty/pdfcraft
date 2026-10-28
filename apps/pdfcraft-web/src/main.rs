@@ -75,6 +75,11 @@ fn main() {
                         // COL-08, COL-09: saves wait for `evora:saved` when `doc.saved-ack` is effective.
                         app.host_save_ack = Some(link.save_fn());
                         app.host_dirty = Some(link.dirty_fn());
+                        // COL-42: under the bridge the browser downloads nothing; every file the app
+                        // would download goes to the host (`evora:export`), or is refused.
+                        PdfCraftApp::set_host_export(Some(link.export_fn()));
+                        // COL-42: F6 gives the keyboard back to the host (`ui.focus-out`).
+                        ehp::listen_exit_key(link.clone());
                         let outcomes = app.host_save_outcomes.clone();
                         ehp::connect(link.clone(), outcomes, events.clone(), shared.clone(), cc.egui_ctx.clone());
                         // CI only (`?evora-audit=1`): the smoke test edits the document (`window.__evoraRun`).
@@ -105,7 +110,16 @@ fn main() {
                             &"PdfCraft: ?host=parent needs a framing page on the same origin; saves download instead".into(),
                         );
                     }
-                    Ok(Box::new(EvoraApp { inner: app, events, gate, link: bridge_link, probe, pending_open: None, held: Vec::new() }))
+                    Ok(Box::new(EvoraApp {
+                        inner: app,
+                        events,
+                        gate,
+                        link: bridge_link,
+                        probe,
+                        pending_open: None,
+                        held: Vec::new(),
+                        catalog_due: false,
+                    }))
                 }),
             )
             .await;
@@ -122,6 +136,10 @@ fn main() {
         }
     });
 }
+
+/// Evora (EVO-CMD, COL-43): the commands Evora may run in the Atelier.
+#[cfg(target_arch = "wasm32")]
+mod host_commands;
 
 #[cfg(target_arch = "wasm32")]
 fn warn_before_unload(unsaved: std::sync::Arc<std::sync::atomic::AtomicBool>) {
@@ -143,10 +161,12 @@ fn warn_before_unload(unsaved: std::sync::Arc<std::sync::atomic::AtomicBool>) {
 /// origin can still list every key; the isolation comes from serving the engine on its own site
 /// (mode B).
 ///
-/// What this engine keeps in the browser, as measured in its code: its settings (drawn signatures,
-/// initials, digital IDs, trusted certificates and stamps included) and eframe's UI memory
-/// (`egui_memory_ron`), both in localStorage. No OPFS, no IndexedDB, no Cache Storage, no cookie,
-/// and no recovery store on the web (`RecoveryStore` is desktop only). Under the bridge:
+/// What this engine keeps in the browser, as measured in its code: its settings and eframe's UI
+/// memory (`egui_memory_ron`), both in localStorage. No OPFS, no IndexedDB, no Cache Storage, no
+/// cookie, and no recovery store on the web (`RecoveryStore` is desktop only). Under the bridge, the
+/// member's signatures, initials, digital IDs and trusted certificates are never among the settings
+/// written, and are ignored if an earlier build left them there (COL-42, [`IDENTITY_SETTINGS`]):
+/// they live in memory for the session only. Under the bridge:
 /// - the settings are written only under `evora.pdfcraft.<storageNs>`, once `evora:init` has given
 ///   the namespace and the app has restored them, and eframe's UI memory is never written
 ///   ([`Gate`], `EvoraApp::save`);
@@ -407,6 +427,28 @@ mod storage_ns {
         if let Some(s) = storage() {
             let _ = s.remove_item(EFRAME_MEMORY);
         }
+    }
+
+    /// COL-42: the settings the Atelier never keeps in the browser under the bridge: the member's
+    /// drawn, typed or image signature, initials and signature graphic, digital IDs and trusted
+    /// certificates (keys of `PdfCraftApp::persist`). They stay in memory for the session only.
+    pub const IDENTITY_SETTINGS: [&str; 7] =
+        ["signature", "signature_text", "signature_image", "initials", "sign_graphic", "digital_ids", "trusted"];
+
+    /// The settings `json` without [`IDENTITY_SETTINGS`]; `None` when it isn't a JSON object (then
+    /// nothing is written, nor restored).
+    pub fn without_identity(json: &str) -> Option<String> {
+        let value = js_sys::JSON::parse(json).ok()?;
+        if !value.is_object() || js_sys::Array::is_array(&value) {
+            return None;
+        }
+        let object: &js_sys::Object = value.unchecked_ref();
+        for key in IDENTITY_SETTINGS {
+            if !js_sys::Reflect::delete_property(object, &JsValue::from_str(key)).ok()? {
+                return None;
+            }
+        }
+        js_sys::JSON::stringify(&value).ok().map(String::from)
     }
 }
 
@@ -747,13 +789,19 @@ mod ehp {
     /// Build slug and protocol version announced in `evora:ready` (§4.4, §10).
     const APP: &str = "colophon-atelier";
     const EHP: &str = "1.0";
-    /// What this engine honours (§9.1). Not yet: `export.drive` (patch COL-03).
-    const CAPABILITIES: [&str; 10] = [
+    /// What this engine honours (§9.1). COL-42: `export.drive` (every file the app would download
+    /// goes to the host) and `ui.focus-out` (F6, amendment A-19 of §7.9, which a host of minor 0
+    /// accepts: the engine still speaks EHP 1.0); COL-43: `command` and `command.catalog` (EVO-CMD).
+    const CAPABILITIES: [&str; 14] = [
         "doc.open",
         "doc.save",
         "doc.saved-ack",
         "doc.dirty",
         "doc.request-save",
+        "export.drive",
+        "command",
+        "command.catalog",
+        "ui.focus-out",
         "live.lang",
         "live.theme",
         "storage.ns",
@@ -792,7 +840,12 @@ mod ehp {
     /// The admitted parent origins, beside `index.html` (§2.3).
     const CONFIG: &str = "evora-host.json";
     const LANGS: [&str; 14] = ["ar", "de", "en", "es", "fr", "hi", "id", "it", "ja", "ko", "pt", "ru", "tr", "zh-Hans"];
-    const CAPABILITY_NAMES: [&str; 18] = [
+    /// COL-42: the key that gives the keyboard back to the host, without a modifier (§7.9).
+    const EXIT_KEY: &str = "F6";
+    /// `command` of `evora:command` (§4.3, §9.1): at most 100 characters.
+    const COMMAND_MAX_CHARS: usize = 100;
+    /// What an `evora:init` may name: §4.2, and the extensions of the host's ceiling (§9.1).
+    const CAPABILITY_NAMES: [&str; 23] = [
         "doc.open",
         "doc.save",
         "doc.saved-ack",
@@ -811,6 +864,11 @@ mod ehp {
         "live.theme",
         "font.inject",
         "author",
+        "ui.focus-out",
+        "ui.activity",
+        "drop.files",
+        "prefs.sync",
+        "command.catalog",
     ];
 
     /// What the host asks of the app, applied at the start of the next frame (`EvoraApp::logic`).
@@ -827,6 +885,9 @@ mod ehp {
         /// `evora:open` `re` (COL-40): the app opens the bytes, then the bridge answers. S-ACK-6: the
         /// same `docRef` again ("reload the server's version") replaces the document it names.
         Open(OpenRequest),
+        /// COL-43: `evora:command` `re`: the command, whether its `params` were `{}`, and whether
+        /// Evora's member confirmed it (`confirmed: true`).
+        Command { re: String, command: String, params_empty: bool, confirmed: bool },
     }
 
     /// An `evora:open` with bytes, checked, for the app to open on its next frame.
@@ -871,6 +932,11 @@ mod ehp {
         initialized: bool,
         caps: Vec<String>,
         max_document: f64,
+        /// COL-42: `limits.maxExportBytes` of `evora:init`.
+        max_export: f64,
+        /// COL-42: the session's document shown now (`DocId.0`), whose `docRef` an `evora:export`
+        /// names when the host opened it.
+        active_doc: Option<u64>,
         storage_ns: Option<String>,
         /// The documents the host opened, to tell which one a save is (COL-40: by document, not name).
         docs: Vec<HostDoc>,
@@ -1025,6 +1091,173 @@ mod ehp {
                 }
             })
         }
+
+        /// Whether capability `c` is effective: the host offered it in `evora:init` and this engine
+        /// declares it.
+        pub fn has(&self, c: &str) -> bool {
+            self.state().is_some_and(|state| {
+                let st = state.borrow();
+                st.initialized && st.caps.iter().any(|have| have == c)
+            })
+        }
+
+        /// COL-42 (`export.drive`, §7.4): `evora:export {docRef?, name, mime, bytes}` for every file
+        /// the app would download (`HostExportFn`, installed under the bridge from the start). The
+        /// host files it in Evora's Drive and answers `evora:ack`, then tells the member itself.
+        /// Without the capability the file is refused: under the bridge, never a browser download.
+        /// `docRef` names the document shown, when the host opened it; `mime` follows the name's
+        /// extension (indicative: Evora's server determines the real type, §5.4).
+        pub fn export_fn(&self) -> pdfcraft_ui_egui::HostExportFn {
+            let link = self.clone();
+            Box::new(move |name: &str, bytes: &[u8]| {
+                let state = link.state().ok_or_else(|| "Evora is not connected yet".to_string())?;
+                let st = state.borrow();
+                if !st.initialized || !st.caps.iter().any(|c| c == "export.drive") {
+                    return Err("Evora can't receive files from here".into());
+                }
+                if bytes.is_empty() {
+                    return Err("the file is empty".into());
+                }
+                if bytes.len() as f64 > st.max_export {
+                    return Err("the file is too large to send to Evora".into());
+                }
+                let name = clean_name(name);
+                let buffer = js_sys::Uint8Array::from(bytes).buffer();
+                let mut fields: Vec<(&str, JsValue)> =
+                    vec![("name", name.as_str().into()), ("mime", mime_of(&name).into()), ("bytes", buffer.clone().into())];
+                let shown = st.active_doc.and_then(|doc| st.docs.iter().find(|d| d.doc == doc));
+                if let Some(doc) = shown {
+                    fields.push(("docRef", doc.doc_ref.clone().into()));
+                }
+                let payload = object(&fields).ok_or_else(|| "couldn't build the message".to_string())?;
+                send(&st, "evora:export", None, &payload, Some(&buffer)).map(|_| ()).ok_or_else(|| "couldn't send the file".to_string())
+            })
+        }
+
+        /// COL-42 (`ui.focus-out`, amendment A-19 of §7.9): `evora:focus-out {}`; `false` when the
+        /// capability isn't effective.
+        pub fn focus_out(&self) -> bool {
+            let Some(state) = self.state() else { return false };
+            let st = state.borrow();
+            if !st.initialized || !st.caps.iter().any(|c| c == "ui.focus-out") {
+                return false;
+            }
+            object(&[]).is_some_and(|payload| send(&st, "evora:focus-out", None, &payload, None).is_some())
+        }
+
+        /// Told every frame: the session's document shown (`DocId.0`), which an `evora:export` names,
+        /// and the documents still open. COL-40 leftover: a host document whose tab is gone is
+        /// forgotten, so no later message names its `docRef` for another document.
+        pub fn sync_docs(&self, shown: Option<u64>, open: &[u64]) {
+            if let Some(state) = self.state() {
+                let mut st = state.borrow_mut();
+                st.active_doc = shown;
+                st.docs.retain(|d| open.contains(&d.doc));
+            }
+        }
+
+        /// COL-43: `evora:commands` (§9.1), the catalog, with `command.catalog` effective.
+        pub fn commands(&self, entries: &[crate::host_commands::Entry], lang: &str, hash: &str) {
+            let Some(state) = self.state() else { return };
+            let st = state.borrow();
+            if !st.initialized || !st.caps.iter().any(|c| c == "command.catalog") {
+                return;
+            }
+            let list = js_sys::Array::new();
+            for e in entries {
+                let mut fields: Vec<(&str, JsValue)> = vec![
+                    ("id", e.id.into()),
+                    ("label", e.label.as_str().into()),
+                    ("enabled", e.enabled.into()),
+                    ("destructive", e.destructive.into()),
+                ];
+                if let Some(menu) = &e.path {
+                    fields.push(("path", js_sys::Array::of1(&JsValue::from_str(menu)).into()));
+                }
+                if let Some(entry) = object(&fields) {
+                    list.push(&entry);
+                }
+            }
+            // The default parameter schema: none (no command of this engine declares one).
+            let Some(params) = object(&[("type", "object".into()), ("maxProperties", 0.0.into())]) else { return };
+            let Some(payload) = object(&[
+                ("lang", lang.into()),
+                ("count", (list.length() as f64).into()),
+                ("hash", hash.into()),
+                ("params", params.into()),
+                ("commands", list.into()),
+            ]) else {
+                return;
+            };
+            let _ = send(&st, "evora:commands", None, &payload, None);
+        }
+
+        /// COL-43: answer `evora:command` `re` (`Ok`: the command ran; `Err`: its `ackCode`).
+        pub fn answer_command(&self, re: &str, outcome: Result<(), &'static str>) {
+            if let Some(state) = self.state() {
+                let st = state.borrow();
+                match outcome {
+                    Ok(()) => ack(&st, re, true, None),
+                    Err(code) => ack(&st, re, false, Some(code)),
+                }
+            }
+        }
+    }
+
+    /// COL-42 (`ui.focus-out`, §7.9, as the patch LUM-13 of Lumbra): F6 without a modifier, with the
+    /// capability effective, is held back from the canvas and the browser, before any listener of
+    /// the page (capture on the window), and gives the keyboard back to the host
+    /// (`evora:focus-out`). A held key sends once. Without the capability, F6 is left alone.
+    pub fn listen_exit_key(link: Link) {
+        let Some(window) = web_sys::window() else { return };
+        let on_key = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+            if e.key() != EXIT_KEY || e.alt_key() || e.ctrl_key() || e.meta_key() || e.shift_key() || !link.has("ui.focus-out") {
+                return;
+            }
+            // Neither the canvas nor the browser sees it: the key belongs to the host.
+            e.prevent_default();
+            e.stop_immediate_propagation();
+            if e.type_() == "keydown" && !e.repeat() {
+                link.focus_out();
+            }
+        });
+        let listener: &js_sys::Function = on_key.as_ref().unchecked_ref();
+        let down = window.add_event_listener_with_callback_and_bool("keydown", listener, true).is_ok();
+        let up = window.add_event_listener_with_callback_and_bool("keyup", listener, true).is_ok();
+        if down || up {
+            // The listener lives as long as the page.
+            on_key.forget();
+        }
+    }
+
+    /// COL-42: the media type of an exported file, by its name's extension (`application/octet-stream`
+    /// when unknown). Indicative only: Evora's server determines the real type (§5.4).
+    fn mime_of(name: &str) -> &'static str {
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+        match ext.as_str() {
+            "pdf" => "application/pdf",
+            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "html" | "htm" => "text/html",
+            "rtf" => "application/rtf",
+            "txt" => "text/plain",
+            "csv" => "text/csv",
+            "xml" => "application/xml",
+            "xfdf" => "application/vnd.adobe.xfdf",
+            "fdf" => "application/vnd.fdf",
+            "xdp" => "application/vnd.adobe.xdp+xml",
+            "json" => "application/json",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "tif" | "tiff" => "image/tiff",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "svg" => "image/svg+xml",
+            "zip" => "application/zip",
+            _ => "application/octet-stream",
+        }
     }
 
     /// CI only (`?host=evora&evora-audit=1`): `window.__evoraRun("page.rotate")` queues one of
@@ -1068,6 +1301,8 @@ mod ehp {
                 initialized: false,
                 caps: Vec::new(),
                 max_document: 0.0,
+                max_export: 0.0,
+                active_doc: None,
                 storage_ns: None,
                 docs: Vec::new(),
                 pending_saves: Vec::new(),
@@ -1194,6 +1429,7 @@ mod ehp {
             "evora:lang" => Some("live.lang"),
             "evora:theme" => Some("live.theme"),
             "evora:purge" => Some("storage.purge"),
+            "evora:command" => Some("command"),
             // Unknown here, or a capability this engine doesn't declare: ignored (§4.1, §10).
             _ => return,
         };
@@ -1228,6 +1464,7 @@ mod ehp {
             "evora:lang" => on_lang(state, &id, &payload),
             "evora:theme" => on_theme(state, &id, &payload),
             "evora:purge" => on_purge(state, &id, &payload),
+            "evora:command" => on_command(state, &id, &payload),
             _ => {}
         }
     }
@@ -1276,7 +1513,9 @@ mod ehp {
         let limits_ok = plain_object(&limits)
             && only_keys(&limits, &["maxDocumentBytes", "maxExportBytes"])
             && [max_document, max_export].iter().all(|m| m.is_some_and(|m| m >= 1.0 && m.fract() == 0.0));
-        let (Some(engine_lang), Some(ns), Some(author), Some(caps), Some(max_document)) = (engine_lang, ns, author, caps, max_document) else {
+        let (Some(engine_lang), Some(ns), Some(author), Some(caps), Some(max_document), Some(max_export)) =
+            (engine_lang, ns, author, caps, max_document, max_export)
+        else {
             return;
         };
         if !(lang_ok && accent_ok && read_only_ok && caps_ok && prefs_ok && limits_ok) {
@@ -1304,6 +1543,7 @@ mod ehp {
         }
         st.caps = caps;
         st.max_document = max_document;
+        st.max_export = max_export;
         st.initialized = true;
         st.storage_ns = storage_ns;
         let author = author.filter(|_| st.caps.iter().any(|c| c == "author"));
@@ -1510,6 +1750,41 @@ mod ehp {
         }
     }
 
+    /// COL-43 (EVO-CMD): `evora:command {command, params, confirmed?}` (§4.3, §9.1), checked, for the
+    /// app's next frame, which runs it and answers (`EvoraApp::run_command`). A malformed one is
+    /// ignored (§5.2).
+    fn on_command(state: &Rc<RefCell<State>>, id: &str, p: &JsValue) {
+        let st = state.borrow();
+        if !only_keys(p, &["command", "params", "confirmed"]) {
+            return;
+        }
+        let Some(command) = get(p, "command").as_string().filter(|c| is_command(c)) else { return };
+        let params = get(p, "params");
+        if !plain_object(&params) {
+            return;
+        }
+        let confirmed = get(p, "confirmed");
+        let confirmed = if confirmed.is_undefined() {
+            false
+        } else {
+            match confirmed.as_bool() {
+                Some(c) => c,
+                None => return,
+            }
+        };
+        let params_empty = js_sys::Object::keys(params.unchecked_ref::<js_sys::Object>()).length() == 0;
+        st.events.borrow_mut().push(HostEvent::Command { re: id.to_string(), command, params_empty, confirmed });
+        st.ctx.request_repaint();
+    }
+
+    /// `command` of §4.3: `^[a-z][A-Za-z0-9_.-]*$`, at most [`COMMAND_MAX_CHARS`] characters.
+    fn is_command(c: &str) -> bool {
+        let mut chars = c.chars();
+        c.chars().count() <= COMMAND_MAX_CHARS
+            && chars.next().is_some_and(|f| f.is_ascii_lowercase())
+            && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+    }
+
     fn ack(st: &State, re: &str, ok: bool, code: Option<&str>) {
         let mut fields: Vec<(&str, JsValue)> = vec![("ok", ok.into())];
         if let Some(code) = code {
@@ -1640,6 +1915,9 @@ struct EvoraApp {
     /// COL-40 (correction 1): files dropped or picked (the app's `inbox`) while a host document waits
     /// for its password, in order. They open once it is answered, never during the prompt.
     held: Vec<(String, Vec<u8>)>,
+    /// COL-43: the catalog (`evora:commands`) is to be sent on this frame: after `evora:init`, then
+    /// after each `evora:lang` (labels in the new language).
+    catalog_due: bool,
 }
 
 /// COL-40: an `evora:open` whose bytes raised the password prompt: answered once the document opens,
@@ -1666,8 +1944,9 @@ impl EvoraApp {
                 ehp::HostEvent::Init { settings, writable, lang, dark, author } => {
                     // E5: this account's settings first, then the host's language, theme and author
                     // on top; only then may the settings be written, under this account's namespace
-                    // (unless a purge has sealed the gate meanwhile).
-                    if let Some(json) = settings {
+                    // (unless a purge has sealed the gate meanwhile). COL-42: never the signatures,
+                    // initials or certificates an earlier build may have left there.
+                    if let Some(json) = settings.as_deref().and_then(storage_ns::without_identity) {
                         self.inner.restore(&json);
                     }
                     self.inner.language = lang.unwrap_or("en").to_string();
@@ -1680,10 +1959,17 @@ impl EvoraApp {
                     {
                         gate.borrow_mut().open();
                     }
+                    self.catalog_due = true;
                 }
-                ehp::HostEvent::Lang(lang) => self.inner.language = lang.unwrap_or("en").to_string(),
+                ehp::HostEvent::Lang(lang) => {
+                    self.inner.language = lang.unwrap_or("en").to_string();
+                    self.catalog_due = true;
+                }
                 ehp::HostEvent::Theme(dark) => self.set_dark(dark),
                 ehp::HostEvent::RequestSave { re, doc } => self.request_save(&re, doc),
+                ehp::HostEvent::Command { re, command, params_empty, confirmed } => {
+                    self.run_command(&re, &command, params_empty, confirmed);
+                }
                 ehp::HostEvent::Open(open) => {
                     if self.pending_open.is_some() || self.inner.password_prompt.is_some() || !later.is_empty() {
                         later.push(ehp::HostEvent::Open(open));
@@ -1822,6 +2108,13 @@ impl EvoraApp {
         }
     }
 
+    /// COL-43: the host's `evora:command` `re`, run as its menu entry runs it, under the white list of
+    /// `host_commands`, then answered (`evora:ack`).
+    fn run_command(&mut self, re: &str, command: &str, params_empty: bool, confirmed: bool) {
+        let Some(link) = self.link.clone() else { return };
+        link.answer_command(re, host_commands::run(&mut self.inner, command, params_empty, confirmed));
+    }
+
     fn set_dark(&mut self, dark: bool) {
         use pdfcraft_ui_egui::theme::ThemePreference;
         self.inner.set_theme_preference(if dark { ThemePreference::Dark } else { ThemePreference::Light });
@@ -1840,10 +2133,14 @@ impl eframe::App for EvoraApp {
             None => eframe::App::save(&mut self.inner, storage),
             // E5: under this account's namespace only, once `evora:init` has opened the gate, and
             // never after `evora:purge` has sealed it.
+            // COL-42: without the member's signatures, initials and certificates, which stay in
+            // memory for the session; settings that can't be read as an object aren't written.
             Some(gate) => {
                 let key = gate.borrow().key();
-                if let Some(key) = key {
-                    storage.set_string(&key, self.inner.persist());
+                if let Some(key) = key
+                    && let Some(settings) = storage_ns::without_identity(&self.inner.persist())
+                {
+                    storage.set_string(&key, settings);
                 }
             }
         }
@@ -1857,6 +2154,11 @@ impl eframe::App for EvoraApp {
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.apply_host_events();
+        // COL-42: the document shown names the `docRef` of an `evora:export`; COL-40 leftover: the
+        // host documents whose tab is gone are forgotten.
+        if let Some(link) = &self.link {
+            link.sync_docs(self.inner.active_ids().map(|(_, id)| id.0), &self.doc_ids());
+        }
         // CI only (`window.__evoraRun`, `?evora-audit=1`): the smoke test's edits.
         let commands: Vec<String> = std::mem::take(&mut *self.probe.borrow_mut());
         for command in commands {
@@ -1870,6 +2172,13 @@ impl eframe::App for EvoraApp {
         // COL-40 (correction 1): nothing dropped or picked opens under the host document's prompt.
         self.hold_local_opens();
         eframe::App::logic(&mut self.inner, ctx, frame);
+        // COL-43: the catalog, once the host's language is applied (`evora:init`, `evora:lang`).
+        if std::mem::take(&mut self.catalog_due)
+            && let Some(link) = &self.link
+        {
+            let (entries, lang, hash) = host_commands::catalog(&self.inner);
+            link.commands(&entries, lang, &hash);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {

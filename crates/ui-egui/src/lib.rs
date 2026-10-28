@@ -566,6 +566,12 @@ pub type HostSaveAckFn = Box<dyn Fn(u64, &str, &[u8], bool) -> Result<Option<u64
 /// Evora (COL-09): outcomes of acknowledged saves, `(ticket, ok)`, applied on the next frame.
 pub type HostSaveOutcomes = std::sync::Arc<std::sync::Mutex<Vec<(u64, bool)>>>;
 
+/// Evora (COL-42, the Evora host protocol's `export.drive`): on the web, a host page that takes
+/// every file the app would otherwise hand to the browser's downloads (exports, extracted pages,
+/// reports, print-ready copies), as `(name, bytes)`; the host files it in Evora's Drive. Installed
+/// with `PdfCraftApp::set_host_export`.
+pub type HostExportFn = Box<dyn Fn(&str, &[u8]) -> Result<(), String>>;
+
 /// Evora (COL-09): a save handed to a host that acknowledges saves, until its outcome arrives: the
 /// bytes sent and the document's edit generation when they were taken.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]

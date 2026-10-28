@@ -1191,10 +1191,30 @@ fn short_name(path: &str) -> String {
     std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
 }
 
-/// Offer bytes as a browser download.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// Evora (COL-42): where [`download`] hands the files instead of the browser, once a host page
+    /// asked for them (`PdfCraftApp::set_host_export`).
+    static HOST_EXPORT: std::cell::RefCell<Option<crate::HostExportFn>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(target_arch = "wasm32")]
+impl PdfCraftApp {
+    /// Evora (COL-42): from now on, every file the app would download goes to `export` instead, and
+    /// the browser downloads nothing; `None` gives the downloads back to the browser.
+    pub fn set_host_export(export: Option<crate::HostExportFn>) {
+        HOST_EXPORT.with(|h| *h.borrow_mut() = export);
+    }
+}
+
+/// Offer bytes as a browser download. Evora (COL-42): or hand them to the host page that asked for
+/// them (`PdfCraftApp::set_host_export`), which then gets every such file.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn download(name: &str, bytes: &[u8]) -> Result<(), String> {
     use wasm_bindgen::JsCast;
+    if let Some(sent) = HOST_EXPORT.with(|h| h.borrow().as_ref().map(|export| export(name, bytes))) {
+        return sent;
+    }
     let err = |e: wasm_bindgen::JsValue| format!("{e:?}");
     let array = js_sys::Uint8Array::from(bytes);
     let parts = js_sys::Array::of1(&array);

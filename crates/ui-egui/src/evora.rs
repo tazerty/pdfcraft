@@ -152,3 +152,25 @@ pub(crate) fn enforce(app: &mut PdfCraftApp) {
         app.left = LeftPanel::AllTools;
     }
 }
+
+impl PdfCraftApp {
+    /// Evora (EVO-CMD, COL-43): the registry's commands as this build offers them, in registry order
+    /// (the menus and the command palette list the same table), hidden commands left out:
+    /// `(id, label, menu, enabled)`, with the label and the menu's name as displayed in the app's
+    /// language, `menu` `None` for a command no menu shows (palette and tool panels only), and
+    /// `enabled` as its menu entry is now. The host bridge picks among them what Evora may run.
+    pub fn evora_commands(&self) -> Vec<(&'static str, String, Option<String>, bool)> {
+        crate::i18n::set_current(crate::i18n::Lang::from_pref(&self.language));
+        let active = self.active_ids().map(|(_, id)| id);
+        pdfcraft_engine::commands::COMMANDS
+            .iter()
+            .filter(|spec| !hidden(spec.id))
+            .map(|spec| {
+                let label = pdfcraft_engine::commands::current_label(spec, &self.session, active);
+                let label = crate::i18n::menu_label(spec.id, &label);
+                let menu = spec.menu.map(|m| crate::i18n::t(m).to_string());
+                (spec.id, label, menu, self.command_enabled(spec))
+            })
+            .collect()
+    }
+}
