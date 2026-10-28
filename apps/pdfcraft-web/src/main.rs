@@ -21,8 +21,7 @@ fn main() {
         // left (`egui_memory_ron`, one key for the whole origin, outside any namespace). eframe reads
         // that key as it starts, before `evora:ready` and `evora:init` (HOST-PROTOCOL.md §4.3, §4.4);
         // the bridge never writes it and `evora:init` erases it anyway, so it goes first, unread.
-        // SABORDAGE QA (EVORA-COL-40) : [rob-memoire-eframe], la mémoire d'eframe n'est plus retirée (condition jamais vraie).
-        if query_param("host").as_deref() == Some("evora-sabordage") {
+        if query_param("host").as_deref() == Some("evora") {
             storage_ns::forget_eframe_memory();
         }
         let started = eframe::WebRunner::new()
@@ -905,8 +904,7 @@ mod ehp {
                 }
                 // COL-40: the host's document is the one the host opened in this very tab, never one
                 // found by its name: a local file of the same name is not saved as it.
-                // SABORDAGE QA (EVORA-COL-40) : [rob-docref-nom], le premier document de la coquille, quel que soit celui enregistré.
-                let Some(doc_ref) = st.docs.iter().find(|d| d.doc == doc || !d.doc_ref.is_empty()).map(|d| d.doc_ref.clone()) else {
+                let Some(doc_ref) = st.docs.iter().find(|d| d.doc == doc).map(|d| d.doc_ref.clone()) else {
                     st.request_failure = Some("not_found");
                     return Err("only a document opened from Evora can be saved here".into());
                 };
@@ -1294,8 +1292,7 @@ mod ehp {
         // survived) refuses the init: the engine stays uninitialised, opens nothing and the host
         // stops (`init_refused`). A browser that gives the page no storage at all has nothing to
         // erase: the engine then starts with its settings in memory only.
-        // SABORDAGE QA (EVORA-COL-40) : [rob-init-purge], une purge manquée ne refuse plus evora:init.
-        if erased == crate::storage_ns::Erasure::Failed && st.ready_id.is_empty() {
+        if erased == crate::storage_ns::Erasure::Failed {
             ack(&st, id, false, Some("forbidden"));
             return;
         }
@@ -1729,8 +1726,7 @@ impl EvoraApp {
             (Ok(()), None) if self.inner.password_prompt.is_some() => {
                 self.pending_open = Some(PendingOpen { re: open.re, doc_ref: open.doc_ref, before });
             }
-            // SABORDAGE QA (EVORA-COL-40) : [rob-open-ack], accusé positif sans ouverture réelle.
-            _ => link.answer(&open.re, true, "clean"),
+            _ => link.opened(&open.re, &open.doc_ref, Err("invalid_content")),
         }
     }
 
