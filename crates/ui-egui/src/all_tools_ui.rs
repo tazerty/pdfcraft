@@ -36,8 +36,16 @@ fn matches(query: &str, group: &ToolGroup) -> Option<Vec<&'static str>> {
     let action_hit = |id: &&str| {
         pdfcraft_engine::commands::command(id).is_some_and(|spec| label_hit(spec.label, &crate::i18n::menu_label(spec.id, spec.label), query, rtl))
     };
-    let items: Vec<_> =
-        group.sections.iter().flat_map(|s| s.items.iter()).filter(|i| hit(i.label) || i.actions.iter().any(action_hit)).map(|i| i.label).collect();
+    // Evora (COL-05, COL-10, OCR, Q47 (a)): a hidden item, or a hidden command of an item's menu,
+    // neither finds the tool nor is named on its tile.
+    let items: Vec<_> = group
+        .sections
+        .iter()
+        .flat_map(|s| s.items.iter())
+        .filter(|i| !crate::evora::hidden(i.command))
+        .filter(|i| hit(i.label) || i.actions.iter().filter(|a| !crate::evora::hidden(a)).any(action_hit))
+        .map(|i| i.label)
+        .collect();
     (!items.is_empty()).then_some(items)
 }
 
@@ -78,8 +86,14 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 ui.set_width(ui.available_width());
                 let mut any = false;
                 for category in TOOL_CATEGORIES {
-                    let found: Vec<_> =
-                        category.groups.iter().filter_map(|id| catalog::group(id)).filter_map(|g| matches(&query, g).map(|m| (g, m))).collect();
+                    // Evora (COL-05, COL-10, OCR, Q47 (a)): a tool whose items are all hidden has no tile.
+                    let found: Vec<_> = category
+                        .groups
+                        .iter()
+                        .filter_map(|id| catalog::group(id))
+                        .filter(|g| !crate::evora::hidden_group(g))
+                        .filter_map(|g| matches(&query, g).map(|m| (g, m)))
+                        .collect();
                     if found.is_empty() {
                         continue;
                     }

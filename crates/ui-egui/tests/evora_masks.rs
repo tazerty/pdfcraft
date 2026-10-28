@@ -19,12 +19,17 @@
 //! a PDF, Use guided actions) is searched for there by its label, beside a kept group that must be
 //! proposed (twin witness). The CI witness `evora-witness-palette-groups` reopens every group in the
 //! palette: these checks, and they alone, must then fail (judged by `gates.py masks-witness`).
+//!
+//! EVORA-COL-38 (rise to v0.14.0): the expanded All tools view (« Expand all tools », all_tools_ui.rs)
+//! lists the catalogue's tools by category and names the items a search finds; a hidden tool must have
+//! no tile and a hidden item no mention (family « vue-outils »). The Edit workspace's quick bar offers
+//! « Edit text & images » (Q47 (a)): it must not while editing existing text is hidden.
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use pdfcraft_engine::catalog::TOOL_GROUPS;
 use pdfcraft_engine::commands::COMMANDS;
-use pdfcraft_ui_egui::{Dialog, LeftPanel, PdfCraftApp, QuickTool, RightPanel};
+use pdfcraft_ui_egui::{Dialog, LeftPanel, Mode, PdfCraftApp, QuickTool, RightPanel};
 
 /// D-9, COL-05: digital signatures, certification, and the timestamp planned beside them.
 const SIGNATURE: &[&str] = &["sign.digital", "sign.certify", "sign.certify_invisible", "sign.timestamp"];
@@ -167,6 +172,19 @@ fn registered(id: &str) -> bool {
 
 fn group_label(id: &str) -> &'static str {
     TOOL_GROUPS.iter().find(|g| g.id == id).map_or("", |g| g.label)
+}
+
+/// Painted tile notes of the expanded All tools view that name `label`: a note lists the items the
+/// search found the tool by, joined by « · » (all_tools_ui.rs `tile`).
+fn named_in_notes(h: &Harness<'static, PdfCraftApp>, label: &str) -> usize {
+    painted(h).iter().filter(|t| t.split(" · ").any(|s| s == label)).count()
+}
+
+/// The expanded All tools view searched for `label`, typed in lower case without its « … » (the
+/// search field paints what is typed, which then differs from every label).
+fn view_search(h: &mut Harness<'static, PdfCraftApp>, label: &str) {
+    h.state_mut().all_tools_query = label.trim_end_matches('…').to_lowercase();
+    h.run_steps(3);
 }
 
 /// A PDF built from its objects (numbered from 1), with a cross-reference table.
@@ -475,6 +493,15 @@ fn the_atelier_scope_q47_a_is_respected() {
     tool_panel(&mut h, "edit");
     v.absent(&h, "panneau « Edit a PDF »", "Edit text & images");
     v.present(&h, "panneau « Edit a PDF »", "Header and footer");
+    // EVORA-COL-38: the Edit workspace's quick bar (v0.14.0). Witness: its Select button is drawn.
+    calm(&mut h);
+    let mode = h.state().mode;
+    h.state_mut().mode = Mode::Edit;
+    h.run_steps(3);
+    v.absent(&h, "barre d'outils de l'espace Edit", "Edit text & images");
+    v.present(&h, "barre d'outils de l'espace Edit", "Select (V)");
+    h.state_mut().mode = mode;
+    h.run_steps(2);
     tool_panel(&mut h, "form");
     v.absent(&h, "panneau « Prepare a form »", "Import data");
     v.present(&h, "panneau « Prepare a form »", "Export data");
@@ -526,6 +553,44 @@ fn the_atelier_scope_q47_a_is_respected() {
         });
     }
     forced_state_closes(&mut v, &mut h, &dialogs, &tools);
+    v.finish();
+}
+
+/// EVORA-COL-38: the expanded All tools view (new in v0.14.0), opened without a document (the view
+/// closes when another tab comes to the front): no tile of a hidden tool, no mention of a hidden item
+/// whatever the search, and the kept tools and items found (twins, without which an empty view would
+/// pass for a mask).
+#[test]
+fn the_expanded_all_tools_view_offers_nothing_hidden() {
+    let mut v = Verdict::new("vue-outils");
+    let mut h = harness(false, |app| {
+        app.mode = Mode::AllTools;
+        app.all_tools_full = true;
+    });
+    let open = h.state().all_tools_full && h.state().mode == Mode::AllTools;
+    v.holds(open, || "vue « All tools » étendue : non ouverte, mesure impossible".to_string());
+    v.present(&h, "vue « All tools »", "Collapse all tools");
+    for g in HIDDEN_GROUPS {
+        v.absent(&h, "vue « All tools »", group_label(g));
+    }
+    for g in ["certificate", "fill_sign", "protect", "edit", "form", "javascript", "compress"] {
+        v.present(&h, "vue « All tools »", group_label(g));
+    }
+    for id in SIGNATURE.iter().chain(REDACTION).chain(OCR).chain(SCOPE) {
+        for label in labels(id) {
+            view_search(&mut h, &label);
+            let n = named_in_notes(&h, &label);
+            v.holds(n == 0, || format!("vue « All tools », recherche « {label} » : élément masqué nommé ({n} fois)"));
+            for g in HIDDEN_GROUPS {
+                v.absent(&h, &format!("vue « All tools », recherche « {label} »"), group_label(g));
+            }
+        }
+    }
+    for label in ["Validate all signatures", "Reduce file size", "Protect with password", "Export data", "Add text"] {
+        view_search(&mut h, label);
+        let n = named_in_notes(&h, label);
+        v.holds(n > 0, || format!("vue « All tools », recherche « {label} » : témoin non nommé"));
+    }
     v.finish();
 }
 

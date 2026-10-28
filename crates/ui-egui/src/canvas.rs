@@ -5186,8 +5186,8 @@ fn quick_bar(app: &mut PdfCraftApp, area: Rect, ui: &mut egui::Ui) {
                             });
                     }
                     // Edit text & images, while the Edit workspace is open (Acrobat's Edit toolbar)
-                    // or the tool is in use.
-                    if app.mode == crate::Mode::Edit || app.quick_tool == QuickTool::EditText {
+                    // or the tool is in use. Evora (Q47 (a)): not while editing existing text is hidden.
+                    if (app.mode == crate::Mode::Edit || app.quick_tool == QuickTool::EditText) && !crate::evora::hidden("edit.edit_text") {
                         let on = app.quick_tool == QuickTool::EditText;
                         if icons::button(ui, "text-cursor-input", 32.0, on, tl!("Edit text & images")).clicked() {
                             if on {

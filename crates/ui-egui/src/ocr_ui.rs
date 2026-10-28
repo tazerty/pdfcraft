@@ -200,6 +200,11 @@ impl PdfCraftApp {
     /// background picture) is left alone, and is judged again only when the document changes. It
     /// is one undoable step, "Recognize text", and is not run again for that page after Undo.
     pub(crate) fn auto_ocr_scanned_page(&mut self) {
+        // Evora (OCR rule of the suite): the engine's recognition is hidden; Colophon's server OCR
+        // tool does it. Inert on the web anyway (no recognition models in the web build).
+        if crate::evora::hidden("ocr.recognize") {
+            return;
+        }
         let Some(scan) = self.scan_to_read() else { return };
         if !pdfcraft_engine::ocr::available() {
             self.views[scan.view].auto_ocr_skipped.insert(scan.page, scan.generation);

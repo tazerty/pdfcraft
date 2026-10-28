@@ -646,7 +646,8 @@ MASK_WITNESSES = {
         "groups": {"caviardage": ["redact"], "ocr": ["actions", "scan"], "perimetre-q47": ["actions"]},
     },
 }
-MASK_FAMILIES = ("ids", "signature", "caviardage", "ocr", "perimetre-q47", "temoins")
+# « vue-outils » (EVORA-COL-38) : vue « All tools » étendue de v0.14.0 ; verte sous les deux témoins.
+MASK_FAMILIES = ("ids", "signature", "caviardage", "ocr", "perimetre-q47", "vue-outils", "temoins")
 # Sans ancrage en début de ligne : le harnais de cargo test écrit « test <nom> ... » sans saut de ligne
 # avant la sortie du test, qui commence donc au milieu de la ligne (run 39200498133).
 MASK_COUNTS = re.compile(r"\[([a-z0-9-]+)\] (\d+) contrôle\(s\), (\d+) faute\(s\)$", re.M)
