@@ -36,6 +36,17 @@ Scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
      All tools), aucun libellé masqué n'est dessiné (MASKED_PROBES), et les témoins voisins le sont
      (KEPT_PROBES : sans eux, une surface non dessinée passerait pour un masquage). La recette
      complète, surface par surface, est tests/evora_masks.rs (job « masques »).
+ 12. « pont-robustesse » (COL-40, EVORA-COL-39) : deux moteurs dans la même page parente, un détecteur par
+     défaut corrigé du pont : mémoire d'eframe d'une séance précédente jamais lue avant evora:init
+     [rob-memoire-eframe] ; evora:init refusé quand sa purge n'est pas effective [rob-init-purge] ;
+     evora:open acquitté après l'ouverture réelle, octets illisibles refusés [rob-open-ack] ; document
+     de la coquille jamais retrouvé par son nom, un fichier local homonyme n'est pas envoyé sous son
+     docRef [rob-docref-nom]. Ses quatre détecteurs, et eux seuls, rougissent sous le témoin groupé du
+     lot COL-FK-B1 (défauts réintroduits dans le moteur, puis retirés).
+
+Le témoin « pont-ehp-temoin » (scénario 6) cache aussi au moteur, depuis EVORA-COL-39, les clés qu'il croit
+avoir effacées (length, key()) : sa vérification passe, il ne refuse donc pas evora:init, et le banc garde
+les mêmes détecteurs rouges.
 
 doc.dirty (scénario 4, §7.1 étapes 7 et 8) : comme la coquille, qui lit le contenu du document entre
 l'accusé d'evora:init et evora:open, la page parente n'ouvre le PDF qu'après des images du moteur
@@ -596,10 +607,12 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
     expect = expect or {}
     host = bool(expect.get("ehp"))
     multi = bool(expect.get("instances"))
+    robust = bool(expect.get("robustesse"))
     no_listeners = "no-listeners" in expect.get("sabotage", "").split()
     engine = start_server(PORT_A, "127.0.0.1", directory=site, csp=csp, served=served,
                           host_config={"parentOrigins": [PARENT_ORIGIN]} if host else None)
-    body = parent_page_multi(query) if multi else parent_page(query, host, ACK_HARNESS if expect.get("accuse") else None)
+    body = parent_page_multi(query) if multi else parent_page_rob(query) if robust \
+        else parent_page(query, host, ACK_HARNESS if expect.get("accuse") else None)
     parent = start_server(PORT_B, "127.0.0.1", page=body, served=served)
     # « localhost » peut se résoudre en ::1 : la page parente écoute aussi en IPv6 quand c'est possible.
     try:
@@ -638,6 +651,9 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
                     # du .wasm : l'horodatage (et le sabordage du témoin « no-listeners ») est posé à temps.
                     if no_listeners:
                         chrome.send("Runtime.evaluate", {"expression": NO_LISTENERS, "contextId": ctx["id"]}, sess)
+                    if robust:
+                        # COL-40 : mémoire d'eframe semée et lectures journalisées avant le .wasm.
+                        chrome.send("Runtime.evaluate", {"expression": ROB_EARLY, "contextId": ctx["id"]}, sess)
                     chrome.send("Runtime.evaluate", {"expression": TIMING, "contextId": ctx["id"]}, sess)
         elif method == "Runtime.executionContextDestroyed":
             contexts.pop((sess, params.get("executionContextId")), None)
@@ -738,6 +754,8 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
                 chrome.pump(0.1)
             if multi:
                 run_instances(chrome, page, contexts, result, errors)
+            elif robust:
+                run_robustesse(chrome, page, contexts, result, errors)
             elif expect.get("accuse"):
                 run_accuse(chrome, page, (sess, ctx), contexts, result, errors, expect.get("sabotage", ""))
             elif host:
@@ -813,9 +831,19 @@ STORE_HOOK = """(() => {
   const noRemove = sabotage.split(" ").includes("no-remove");
   window.__evoraBench = false;
   const entry = (op, key, extra) => log.push(Object.assign({op, key, bench: window.__evoraBench === true}, extra || {}));
-  S.setItem = function (k, v) { entry("set", String(k)); return orig.set.call(this, k, v); };
-  S.removeItem = function (k) { entry("remove", String(k)); if (noRemove) return undefined; return orig.remove.call(this, k); };
-  S.clear = function () { entry("clear", null); if (noRemove) return undefined; return orig.clear.call(this); };
+  // Témoin « no-remove » : le moteur croit effacer, rien ne l'est. removeItem et clear sont sans effet, et
+  // les clés qu'il a « effacées » sont cachées à son énumération (length, key()) : sa propre vérification
+  // passe (sans quoi, depuis EVORA-COL-39, il refuserait evora:init). Seuls l'observateur (autre document)
+  // et l'instantané du banc (Object.keys) voient la vérité.
+  const gone = new Set();
+  S.setItem = function (k, v) { entry("set", String(k)); gone.delete(String(k)); return orig.set.call(this, k, v); };
+  S.removeItem = function (k) { entry("remove", String(k)); if (noRemove) { gone.add(String(k)); return undefined; } return orig.remove.call(this, k); };
+  S.clear = function () { entry("clear", null); if (noRemove) { Object.keys(this).forEach((k) => gone.add(k)); return undefined; } return orig.clear.call(this); };
+  if (noRemove) {
+    const visible = (store) => Object.keys(store).filter((k) => !gone.has(k));
+    Object.defineProperty(S, "length", {configurable: true, get() { return visible(this).length; }});
+    S.key = function (i) { const v = visible(this); return i >= 0 && i < v.length ? v[i] : null; };
+  }
   addEventListener("message", (e) => {
     const d = e.data;
     const a = window.__evoraAudit;
@@ -1748,6 +1776,345 @@ INSTANCES_SABOTAGE = "no-listeners"
 INSTANCES_EXPECTED = {"deux-instances-diffusion", "deux-instances-compte", "deux-instances-stockage"}
 
 
+# Scénario « pont-robustesse » (COL-40, EVORA-COL-39) : quatre défauts du pont relevés par les revues
+# du 2026-10-15 (apps/pdf-tool/UPSTREAM.md d'Evora §14.8, §15.5), un détecteur chacun, deux moteurs
+# dans la même page parente (r1, r2 ; window.name evora-<id>) et l'observateur :
+#  [rob-memoire-eframe] la mémoire d'eframe (egui_memory_ron) laissée par une séance précédente n'est
+#     jamais lue avant evora:init : le banc la sème dès la création du contexte du document moteur
+#     (avant le .wasm) et journalise chaque lecture de la clé (ROB_EARLY) ; prémisse : la clé semée et
+#     au moins une lecture d'eframe relevée ;
+#  [rob-init-purge] r2 : un evora:init dont la purge de démarrage n'est pas effective (removeItem sans
+#     effet pour la clé d'un autre compte, semée par le banc) est refusé ({ok: false, code: forbidden})
+#     et le moteur reste non initialisé (un evora:open ensuite reste sans réponse) ; prémisse : la clé
+#     de l'autre compte est toujours là ;
+#  [rob-open-ack] r1 : evora:open d'octets illisibles reçoit {ok: false, code: invalid_content}, jamais
+#     un accusé positif avant l'ouverture réelle ; prémisse : un PDF valide reçoit {ok: true} ;
+#  [rob-docref-nom] r1 : un fichier local du même nom que le document ouvert par la coquille (déposé sur
+#     le canevas) n'est jamais envoyé sous le docRef de ce document par Ctrl+S ; prémisses : Ctrl+S
+#     sur le document de la coquille produit son evora:save, et Ctrl+S sur le fichier local produit
+#     un evora:save ou le refus affiché par le moteur (sonde au rendu ROB_TOAST).
+ROB_INSTANCES = ("r1", "r2")
+ROB_DOC = "01JX" + "R" * 20 + "D1"
+ROB_DOC_BAD = "01JX" + "R" * 20 + "B1"
+ROB_DOC_R2 = "01JX" + "R" * 20 + "D2"
+ROB_NAME = "evora-robustesse.pdf"
+ROB_TOAST = "only a document opened from Evora"
+ROB_EXPECTED = {"rob-memoire-eframe", "rob-init-purge", "rob-open-ack", "rob-docref-nom"}
+ROB_HARNESS = """
+const ENGINE = "%(engine)s";
+const A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+let n = 0;
+const ulid = () => { n += 1; return "01JZZZZZZZZZZZZZZZZZZZZZ" + A[(n >> 5) %% 32] + A[n %% 32]; };
+const PDF = "%(pdf)s";
+const plainObject = (x) => x !== null && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype;
+const copy = (p) => JSON.parse(JSON.stringify(p, (k, v) => v instanceof ArrayBuffer ? {byteLength: v.byteLength} : v));
+const frames = {};
+for (const id of %(ids)s) frames[id] = document.getElementById(id);
+const observer = document.getElementById("observer");
+const st = window.__evoraRob = {ready: {}, caps: {}, log: [], obs: {}, stray: []};
+addEventListener("message", (e) => {
+  const d = e.data;
+  if (e.source === observer.contentWindow && e.origin === ENGINE) {
+    if (plainObject(d) && typeof d.probe === "string") st.obs[d.probe] = {all: d.all, engine: d.engine};
+    return;
+  }
+  const from = Object.keys(frames).find((k) => frames[k].contentWindow === e.source) || null;
+  if (from === null || e.origin !== ENGINE || !plainObject(d) || d.v !== 1) {
+    st.stray.push({origin: e.origin, from, type: plainObject(d) ? d.type : null});
+    return;
+  }
+  st.log.push({from, v: d.v, keys: Object.keys(d), type: d.type, id: d.id, re: "re" in d ? d.re : null,
+               payloadPlain: plainObject(d.payload), payload: plainObject(d.payload) ? copy(d.payload) : null});
+  if (d.type === "evora:ready" && !st.ready[from]) {
+    st.ready[from] = d.id;
+    st.caps[from] = Array.isArray(d.payload && d.payload.capabilities) ? d.payload.capabilities : [];
+  }
+});
+const post = (to, type, payload, re, transfer) => {
+  const id = ulid();
+  const m = {v: 1, type, id, payload};
+  if (re) m.re = re;
+  st.log.push({from: "coquille:" + to, sent: true, type, id, re: re || null, payload: copy(payload)});
+  frames[to].contentWindow.postMessage(m, ENGINE, transfer || []);
+  return id;
+};
+window.__robInit = (to, ns) => st.ready[to] ? post(to, "evora:init", {lang: "fr", engineLang: "fr", theme: "dark",
+  accent: "#4F46E5", readOnly: false, storageNs: ns, displayName: "Compte Evora", capabilities: st.caps[to],
+  prefs: {}, limits: {maxDocumentBytes: 1048576, maxExportBytes: 1048576}}, st.ready[to]) : null;
+window.__robOpen = (to, docRef, name, kind) => {
+  const bytes = kind === "pdf" ? Uint8Array.from(atob(PDF), (c) => c.charCodeAt(0)).buffer
+                               : new TextEncoder().encode("SABORDAGE QA : ceci n'est pas un PDF").buffer;
+  return post(to, "evora:open", {docRef, name, bytes}, null, [bytes]);
+};
+window.__robSend = (to, type, payload, re) => post(to, type, payload, re);
+window.__robProbe = () => { const id = ulid(); observer.contentWindow.postMessage({probe: id}, ENGINE); return id; };
+"""
+ROB_STATE = "JSON.stringify(window.__evoraRob || {})"
+# Posé dès la création du contexte de chaque document de l'origine moteur, avant le .wasm : la mémoire
+# d'eframe d'une séance précédente, et le journal de chaque lecture de sa clé (trouvée ou non, avant ou
+# après la réception d'evora:init par ce document).
+ROB_EARLY = """(() => {
+  if (window.__evoraEarly) return "déjà posé";
+  const early = window.__evoraEarly = {seeded: false, reads: [], init: false};
+  try {
+    localStorage.setItem("egui_memory_ron", "(SABORDAGE QA : mémoire d'eframe d'une séance précédente)");
+    early.seeded = localStorage.getItem("egui_memory_ron") !== null;
+  } catch (e) { early.error = String(e); }
+  const S = Storage.prototype;
+  const get = S.getItem;
+  S.getItem = function (k) {
+    const v = get.call(this, k);
+    if (String(k) === "egui_memory_ron") early.reads.push({found: v !== null, beforeInit: !early.init});
+    return v;
+  };
+  addEventListener("message", (e) => {
+    const d = e.data;
+    if (d !== null && typeof d === "object" && d.type === "evora:init") early.init = true;
+  }, true);
+  return "posé";
+})()"""
+# r2 : removeItem sans effet pour la seule clé `key` (le reste de l'effacement marche).
+ROB_NO_REMOVE = """((key) => {
+  const S = Storage.prototype;
+  const orig = S.removeItem;
+  S.removeItem = function (k) { if (String(k) === key) return undefined; return orig.call(this, k); };
+  return "posé";
+})(%s)"""
+# Un fichier local déposé sur le canevas, comme un glisser-déposer depuis l'ordinateur.
+ROB_DROP = """((b64, name) => {
+  const c = document.getElementById("pdfcraft");
+  if (!c) return -1;
+  const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+  const dt = new DataTransfer();
+  dt.items.add(new File([bytes], name, {type: "application/pdf"}));
+  for (const type of ["dragenter", "dragover", "drop"]) {
+    c.dispatchEvent(new DragEvent(type, {dataTransfer: dt, bubbles: true, cancelable: true}));
+  }
+  return dt.files.length;
+})(%s, %s)"""
+
+
+def two_page_pdf():
+    """Un PDF de deux pages, distinct de minimal_pdf() : le fichier local homonyme de [rob-docref-nom]."""
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] >>"]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n" % (len(objs) + 1) + b"0000000000 65535 f \n"
+    for o in offsets:
+        out += b"%010d 00000 n \n" % o
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
+def parent_page_rob(query):
+    """Page parente du scénario « pont-robustesse » : deux moteurs côte à côte, tous deux visibles, et
+    l'observateur."""
+    harness = ROB_HARNESS % {"engine": ENGINE_ORIGIN, "ids": json.dumps(list(ROB_INSTANCES)),
+                             "pdf": base64.b64encode(minimal_pdf()).decode()}
+    engines = "".join(
+        f'<iframe id="{i}" name="evora-{i}" src="{ENGINE_ORIGIN}/index.html{query}" width="{INSTANCE_W}" '
+        f'height="{INSTANCE_H}"\n style="border:0;display:block" sandbox="allow-scripts allow-same-origin"></iframe>\n'
+        for i in ROB_INSTANCES)
+    return f"""<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Evora smoke : robustesse du pont</title></head>
+<body style="margin:0;background:#fff">
+<div style="display:grid;grid-template-columns:repeat(2,{INSTANCE_W}px);gap:0">
+{engines}</div>
+<iframe id="observer" src="{ENGINE_ORIGIN}/__evora-observer.html" width="10" height="10" style="border:0;display:block"></iframe>
+<script>
+window.__evoraMessages = [];
+addEventListener("message", (e) => {{
+  const d = e.data;
+  window.__evoraMessages.push({{origin: e.origin, type: (d && typeof d === "object" && typeof d.type === "string") ? d.type : null}});
+}});
+{harness}
+</script>
+</body></html>
+""".encode()
+
+
+def run_robustesse(chrome, page, contexts, result, errors):
+    """COL-40 : robustesse du pont (mémoire d'eframe, purge de démarrage, accusé d'ouverture, docRef par
+    document), un détecteur par cas (voir ROB_EXPECTED et l'en-tête du scénario)."""
+    other = NS_PREFIX + NS_OTHER
+    rob = result.setdefault("robustesse", {})
+
+    def ev(expr, session, context=None, gesture=False):
+        return cdp_evaluate(chrome, expr, session, context, gesture)
+
+    def state():
+        return json.loads(ev(ROB_STATE, page) or "{}")
+
+    def wait(cond, timeout=30.0):
+        end = time.monotonic() + timeout
+        st = state()
+        while not cond(st) and time.monotonic() < end:
+            chrome.pump(0.2)
+            st = state()
+        return st
+
+    def settle(seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            chrome.pump(0.1)
+
+    def answer(st, rid, frm):
+        return next((m for m in st.get("log", []) if m.get("from") == frm and rid and m.get("re") == rid), None)
+
+    def ack_payload(st, rid, frm):
+        m = answer(st, rid, frm)
+        return (m.get("payload") or {}) if m and m.get("type") == "evora:ack" else None
+
+    def saves(st, frm, after=-1):
+        return [m for i, m in enumerate(st.get("log", [])) if i > after and m.get("from") == frm and m.get("type") == "evora:save"]
+
+    def engines():
+        found = {}
+        for (sess, ctx), origin in list(contexts.items()):
+            if origin != ENGINE_ORIGIN:
+                continue
+            try:
+                name = ev("window.name", sess, ctx)
+                probe = json.loads(ev(PROBE, sess, ctx) or "{}")
+            except (RuntimeError, TimeoutError):
+                continue
+            key = name[len("evora-"):] if isinstance(name, str) and name.startswith("evora-") else None
+            if key in ROB_INSTANCES and probe.get("canvas") and probe.get("cw", 0) > 0 and probe.get("w") != 300:
+                found[key] = (sess, ctx)
+        return found
+
+    def ctrl_s(frm):
+        sess, ctx = found[frm]
+        focus = ev(FOCUS, sess, ctx, gesture=True)
+        settle(0.3)
+        ev(KEY % {"type": "keydown", "ctrl": "true"}, sess, ctx, gesture=True)
+        settle(0.5)
+        ev(KEY % {"type": "keyup", "ctrl": "false"}, sess, ctx, gesture=True)
+        return focus
+
+    def toast_hits(frm):
+        sess, ctx = found[frm]
+        a = json.loads(ev("JSON.stringify(window.__evoraAudit || null)", sess, ctx) or "null") or {}
+        return int((a.get("probes") or {}).get(ROB_TOAST) or 0)
+
+    end = time.monotonic() + READY_TIMEOUT
+    found = engines()
+    while len(found) < len(ROB_INSTANCES) and time.monotonic() < end:
+        chrome.pump(0.5)
+        found = engines()
+    st = wait(lambda s: all(s.get("ready", {}).get(i) for i in ROB_INSTANCES))
+    if len(found) < len(ROB_INSTANCES) or not all(st.get("ready", {}).get(i) for i in ROB_INSTANCES):
+        errors.append(f"[banc] moteurs prêts : {sorted(found)}, evora:ready reçus : {sorted(st.get('ready', {}))}")
+        return
+
+    # [rob-memoire-eframe] : lectures de egui_memory_ron par chaque moteur avant son evora:init.
+    early = {}
+    for frm in ROB_INSTANCES:
+        sess, ctx = found[frm]
+        early[frm] = json.loads(ev("JSON.stringify(window.__evoraEarly || null)", sess, ctx) or "null")
+    rob["memoire_eframe"] = early
+    for frm, e in early.items():
+        if not e or e.get("seeded") is not True or not e.get("reads"):
+            errors.append(f"[banc] {frm} : mémoire d'eframe non semée avant le .wasm, ou aucune lecture relevée ({e})")
+        elif any(r.get("found") and r.get("beforeInit") for r in e["reads"]):
+            errors.append(f"[rob-memoire-eframe] {frm} : egui_memory_ron d'une séance précédente lue avant evora:init "
+                          f"({e['reads']})")
+
+    # [rob-init-purge] : r2, purge de démarrage sans effet sur la clé d'un autre compte.
+    sess2, ctx2 = found["r2"]
+    rob["r2_sabordage"] = ev(ROB_NO_REMOVE % json.dumps(other), sess2, ctx2)
+    rob["r2_seme"] = ev(SEED % json.dumps([[other, json.dumps({"author": "Autre compte"})]]), sess2, ctx2)
+    init2 = ev(f"window.__robInit('r2', {json.dumps(NS_OWN)})", page)
+    st = wait(lambda s: answer(s, init2, "r2") is not None, 15)
+    p2 = ack_payload(st, init2, "r2")
+    open2 = ev(f"window.__robOpen('r2', {json.dumps(ROB_DOC_R2)}, 'evora-r2.pdf', 'pdf')", page)
+    st = wait(lambda s: answer(s, open2, "r2") is not None, 5)
+    late = answer(st, open2, "r2")
+    pid = ev("window.__robProbe()", page)
+    st = wait(lambda s: pid in (s.get("obs") or {}), 15)
+    kept = other in (((st.get("obs") or {}).get(pid) or {}).get("all") or [])
+    rob["r2"] = {"accuse_init": p2, "reponse_open": late, "cle_autre_compte_presente": kept}
+    if not kept:
+        errors.append("[banc] r2 : la clé de l'autre compte a disparu malgré le sabordage de removeItem ; mesure impossible")
+    elif p2 != {"ok": False, "code": "forbidden"} or late is not None:
+        errors.append(f"[rob-init-purge] r2 : purge de démarrage sans effet, accusé d'evora:init {p2}, réponse à "
+                      f"evora:open ensuite {late} (attendu : {{ok: false, code: forbidden}}, puis aucune réponse)")
+
+    # [rob-open-ack] : r1, octets illisibles, puis un PDF valide (prémisse).
+    init1 = ev(f"window.__robInit('r1', {json.dumps(NS_OWN)})", page)
+    st = wait(lambda s: answer(s, init1, "r1") is not None, 15)
+    if ack_payload(st, init1, "r1") != {"ok": True}:
+        errors.append(f"[banc] r1 : accusé d'evora:init {ack_payload(st, init1, 'r1')} (attendu : {{ok: true}})")
+        return
+    settle(1.0)
+    bad = ev(f"window.__robOpen('r1', {json.dumps(ROB_DOC_BAD)}, 'evora-illisible.pdf', 'garbage')", page)
+    st = wait(lambda s: answer(s, bad, "r1") is not None, 15)
+    pbad = ack_payload(st, bad, "r1")
+    good = ev(f"window.__robOpen('r1', {json.dumps(ROB_DOC)}, {json.dumps(ROB_NAME)}, 'pdf')", page)
+    st = wait(lambda s: answer(s, good, "r1") is not None, 15)
+    pgood = ack_payload(st, good, "r1")
+    rob["r1_ouvertures"] = {"illisible": pbad, "valide": pgood}
+    if pgood != {"ok": True}:
+        errors.append(f"[banc] r1 : un PDF valide reçoit {pgood} (attendu : {{ok: true}}) ; mesure impossible")
+        return
+    if pbad != {"ok": False, "code": "invalid_content"}:
+        errors.append(f"[rob-open-ack] r1 : evora:open d'octets illisibles reçoit {pbad} "
+                      "(attendu : {ok: false, code: invalid_content}, après la tentative d'ouverture)")
+
+    # [rob-docref-nom] : r1, Ctrl+S sur le document de la coquille (prémisse), puis sur un fichier local
+    # homonyme déposé sur le canevas.
+    settle(1.5)
+    mark = len(state().get("log", [])) - 1
+    focus = ctrl_s("r1")
+    st = wait(lambda s: saves(s, "r1", mark), 15)
+    first = saves(st, "r1", mark)
+    if focus is not True or not first or (first[0].get("payload") or {}).get("docRef") != ROB_DOC:
+        errors.append(f"[banc] r1 : Ctrl+S sur le document de la coquille → {[(m.get('payload') or {}).get('docRef') for m in first]} "
+                      f"(focus {focus}) ; attendu : un evora:save de {ROB_DOC}")
+        return
+    ev(f"window.__robSend('r1', 'evora:saved', {{ok: true, version: 2}}, {json.dumps(first[0].get('id'))})", page)
+    settle(1.5)
+    sess1, ctx1 = found["r1"]
+    dropped = ev(ROB_DROP % (json.dumps(base64.b64encode(two_page_pdf()).decode()), json.dumps(ROB_NAME)), sess1, ctx1)
+    settle(3.0)
+    hits0 = toast_hits("r1")
+    mark = len(state().get("log", [])) - 1
+    focus = ctrl_s("r1")
+    st = wait(lambda s: saves(s, "r1", mark), 6)
+    settle(1.0)
+    after = saves(state(), "r1", mark)
+    hits1 = toast_hits("r1")
+    rob["r1_fichier_local"] = {"depose": dropped, "focus": focus, "evora_save_ensuite": [(m.get("payload") or {}).get("docRef") for m in after],
+                               "refus_affiche": [hits0, hits1]}
+    if dropped != 1:
+        errors.append(f"[banc] r1 : dépôt du fichier local sur le canevas impossible ({dropped})")
+    elif after:
+        errors.append(f"[rob-docref-nom] r1 : Ctrl+S sur un fichier local du même nom ({ROB_NAME}) envoie evora:save sous "
+                      f"{[(m.get('payload') or {}).get('docRef') for m in after]} (attendu : aucun envoi, le document "
+                      "de la coquille n'est jamais retrouvé par son nom)")
+    elif hits1 <= hits0:
+        errors.append(f"[banc] r1 : Ctrl+S sur le fichier local sans effet observable (ni evora:save, ni refus affiché : "
+                      f"sonde {hits0} → {hits1}) ; mesure impossible")
+    # Enveloppes et charges utiles de tout ce que les moteurs ont envoyé (§3, §4.4, §4.5).
+    for m in state().get("log", []):
+        if m.get("sent"):
+            continue
+        rule = PAYLOAD_KEYS.get(m.get("type"))
+        p = m.get("payload") or {}
+        if m.get("v") != 1 or not m.get("payloadPlain") or rule is None or not rule[0] <= set(p) <= rule[1] \
+                or not ULID_RE.match(str(m.get("id"))) or (m.get("re") is not None and not ULID_RE.match(str(m.get("re")))):
+            errors.append(f"[ehp] message du moteur non conforme : {m.get('type')} {p}")
+    stray = state().get("stray") or []
+    if stray:
+        errors.append(f"[ehp] messages d'une autre source ou malformés reçus par la page parente : {stray[:5]}")
+    rob["messages"] = [{k: m.get(k) for k in ("from", "sent", "type", "re", "payload")} for m in state().get("log", [])][-40:]
+
+
 def error_tags(errors):
     return {m.group(1) for m in (re.match(r"^\[([^\]]+)\]", e) for e in errors) if m}
 
@@ -1800,7 +2167,8 @@ def main(argv):
         witness = run_scenario("pont-ehp-temoin", site, engine_csp(hashes), out_dir, chrome_bin, ehp_query,
                                {"probe": "evora-smoke", "dark": True, "ehp": True, "sabotage": WITNESS_SABOTAGE})
         results.append(mark_witness(witness, WITNESS_EXPECTED, f"{WITNESS_SABOTAGE} : removeItem sans effet dans le "
-                                    "moteur, evora:dirty glissé avant evora:open"))
+                                    "moteur (clés « effacées » cachées à son énumération), evora:dirty glissé avant "
+                                    "evora:open"))
         # E5 entre pages de l'origine moteur : quatre moteurs (deux comptes) dans la même page parente.
         instances_query = "?host=evora&evora-audit=1"
         results.append(run_scenario("pont-deux-instances", site, engine_csp(hashes), out_dir, chrome_bin,
@@ -1820,6 +2188,11 @@ def main(argv):
                                 {"ehp": True, "accuse": True, "sabotage": ACK_SABOTAGE})
         results.append(mark_witness(witness3, ACK_EXPECTED, f"{ACK_SABOTAGE} : doc.saved-ack retiré d'evora:init "
                                     "(comportement amont), réouverture sous un autre docRef"))
+        # COL-40 : robustesse du pont (mémoire d'eframe, purge de démarrage, accusé d'ouverture, docRef par
+        # document), deux moteurs ; ses détecteurs rougissent sous le témoin groupé du lot COL-FK-B1.
+        rob_query = "?host=evora&evora-audit=1&evora-probe=" + urllib.parse.quote(ROB_TOAST, safe="")
+        results.append(run_scenario("pont-robustesse", site, engine_csp(hashes), out_dir, chrome_bin, rob_query,
+                                    {"ehp": True, "robustesse": True}))
         # COL-05, COL-10, OCR, Q47 (a) : masquages vus au rendu sur les surfaces du démarrage, et leurs
         # témoins (tests/evora_masks.rs juge toutes les autres surfaces).
         masks_query = (f"{ENGINE_QUERY}{sep}evora-probe="
@@ -1885,6 +2258,11 @@ def main(argv):
             if "instances" in r:
                 log(f"- {r['scenario']} : stockage entre pages de l'origine moteur (E5) : "
                     + json.dumps({k: v for k, v in r["instances"].items() if k != "messages"}, ensure_ascii=False)[:2400])
+            if "robustesse" in r:
+                log(f"- {r['scenario']} : robustesse du pont (COL-40) : "
+                    + json.dumps({k: v for k, v in r["robustesse"].items() if k != "messages"}, ensure_ascii=False)[:2400])
+                log(f"- {r['scenario']} : étiquettes rouges : {sorted(error_tags(r['errors']))} "
+                    f"(sous le témoin groupé du lot COL-FK-B1, attendues : {sorted(ROB_EXPECTED)})")
             if "witness_ok" in r:
                 log(f"- {r['scenario']} : témoin sabordé ({r['sabotage_desc']}) ; "
                     f"détecteurs déclenchés {r['tags']} ; attendus {r['expected_red']} ; "

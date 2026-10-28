@@ -714,7 +714,7 @@ impl PdfCraftApp {
             let delivered = match (&self.host_save_ack, &self.host_save) {
                 // Evora (COL-09): a host that acknowledges saves. The document stays modified, and
                 // `after` waits, until it reports success (`apply_host_save_outcomes`).
-                (Some(save), _) => match save(&name, &bytes, save_as) {
+                (Some(save), _) => match save(id.0, &name, &bytes, save_as) {
                     Ok(Some(ticket)) => {
                         let generation = self.session.get(id).map_or(0, |d| d.edit_generation());
                         self.pending_host_saves.push(crate::PendingHostSave { ticket, id, bytes, generation, after: Box::new(after) });

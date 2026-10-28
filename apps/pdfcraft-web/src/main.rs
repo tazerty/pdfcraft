@@ -17,6 +17,13 @@ fn main() {
         else {
             return;
         };
+        // Evora (COL-40): under the Evora bridge, eframe never gets the UI memory an earlier session
+        // left (`egui_memory_ron`, one key for the whole origin, outside any namespace). eframe reads
+        // that key as it starts, before `evora:ready` and `evora:init` (HOST-PROTOCOL.md §4.3, §4.4);
+        // the bridge never writes it and `evora:init` erases it anyway, so it goes first, unread.
+        if query_param("host").as_deref() == Some("evora") {
+            storage_ns::forget_eframe_memory();
+        }
         let started = eframe::WebRunner::new()
             .start(
                 canvas,
@@ -69,7 +76,7 @@ fn main() {
                         app.host_save_ack = Some(link.save_fn());
                         app.host_dirty = Some(link.dirty_fn());
                         let outcomes = app.host_save_outcomes.clone();
-                        ehp::connect(link.clone(), app.startup_inbox.clone(), outcomes, events.clone(), shared.clone(), cc.egui_ctx.clone());
+                        ehp::connect(link.clone(), outcomes, events.clone(), shared.clone(), cc.egui_ctx.clone());
                         // CI only (`?evora-audit=1`): the smoke test edits the document (`window.__evoraRun`).
                         if query_param("evora-audit").as_deref() == Some("1") {
                             ehp::install_probe(probe.clone(), cc.egui_ctx.clone());
@@ -98,7 +105,7 @@ fn main() {
                             &"PdfCraft: ?host=parent needs a framing page on the same origin; saves download instead".into(),
                         );
                     }
-                    Ok(Box::new(EvoraApp { inner: app, events, gate, link: bridge_link, probe }))
+                    Ok(Box::new(EvoraApp { inner: app, events, gate, link: bridge_link, probe, pending_open: None }))
                 }),
             )
             .await;
@@ -152,8 +159,11 @@ fn warn_before_unload(unsaved: std::sync::Arc<std::sync::atomic::AtomicBool>) {
 ///   ([`watch`]): otherwise eframe, which saves every 30 s and on each loss of focus, even in a hidden
 ///   tab, would write the erased namespace back from their memory.
 ///
-/// Nothing else erases anything: no URL parameter, no other message, not the start of the page.
-/// Outside the bridge, upstream's behaviour is unchanged.
+/// Nothing else erases anything: no URL parameter, no other message, not the start of the page, with
+/// one exception (COL-40): under the bridge, eframe's UI memory, which the bridge never writes and
+/// `evora:init` would erase anyway, goes before eframe starts, so that eframe never reads what an
+/// earlier session left there ([`forget_eframe_memory`]). An `evora:init` whose erasure isn't
+/// effective is refused (COL-40). Outside the bridge, upstream's behaviour is unchanged.
 #[cfg(target_arch = "wasm32")]
 mod storage_ns {
     use std::cell::RefCell;
@@ -163,9 +173,12 @@ mod storage_ns {
 
     /// Prefix of the namespaced keys.
     const PREFIX: &str = "evora.pdfcraft.";
+    /// eframe's UI memory, read by eframe as it starts and written by it on each save (one key for the
+    /// whole origin).
+    const EFRAME_MEMORY: &str = "egui_memory_ron";
     /// The keys this engine writes outside the namespaces on its origin: upstream's shared settings,
     /// the settings of the app's former name (PrintCraft), and eframe's UI memory.
-    const LOOSE: [&str; 3] = ["pdfcraft", "printcraft", "egui_memory_ron"];
+    const LOOSE: [&str; 3] = ["pdfcraft", "printcraft", EFRAME_MEMORY];
     /// The channel on which the engine's pages of one origin tell each other what they erased.
     const CHANNEL: &str = "evora.pdfcraft.erased";
 
@@ -350,32 +363,50 @@ mod storage_ns {
         Some(found)
     }
 
-    /// Remove this engine's keys that `doomed` picks, then check that none is left. `false` when the
-    /// storage can't be reached or listed, or a key survived: the erasure isn't effective.
-    fn erase(doomed: impl Fn(&str) -> bool) -> bool {
-        let Some(s) = storage() else { return false };
-        let Some(before) = engine_keys(&s) else { return false };
+    /// What an erasure came to.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Erasure {
+        /// Every key it picked is gone, checked by listing the storage again.
+        Done,
+        /// The browser gives this page no storage at all: nothing can be read, written or erased.
+        NoStorage,
+        /// The storage couldn't be listed, or a key survived: the erasure isn't effective.
+        Failed,
+    }
+
+    /// Remove this engine's keys that `doomed` picks, then check that none is left.
+    fn erase(doomed: impl Fn(&str) -> bool) -> Erasure {
+        let Some(s) = storage() else { return Erasure::NoStorage };
+        let Some(before) = engine_keys(&s) else { return Erasure::Failed };
         for k in before.iter().filter(|k| doomed(k.as_str())) {
             let _ = s.remove_item(k);
         }
-        engine_keys(&s).is_some_and(|after| !after.iter().any(|k| doomed(k.as_str())))
+        if engine_keys(&s).is_some_and(|after| !after.iter().any(|k| doomed(k.as_str()))) { Erasure::Done } else { Erasure::Failed }
     }
 
     /// `evora:init` (§7.7 b): every key of this engine except namespace `keep`.
-    pub fn purge_except(keep: Option<&str>) -> bool {
+    pub fn purge_except(keep: Option<&str>) -> Erasure {
         let keep = keep.and_then(key);
         erase(|k| keep.as_deref() != Some(k))
     }
 
     /// `evora:purge` with `scope: "current"`: namespace `ns` and the keys outside the namespaces.
-    pub fn purge_current(ns: Option<&str>) -> bool {
+    pub fn purge_current(ns: Option<&str>) -> Erasure {
         let current = ns.and_then(key);
         erase(|k| LOOSE.contains(&k) || current.as_deref() == Some(k))
     }
 
     /// `evora:purge` with `scope: "all"`: every namespace and the keys outside them.
-    pub fn purge_all() -> bool {
+    pub fn purge_all() -> Erasure {
         erase(|_| true)
+    }
+
+    /// COL-40, before eframe starts under the bridge: eframe's UI memory goes, unread, so that eframe
+    /// (which reads it as it starts, before `evora:init`) never gets what an earlier session left.
+    pub fn forget_eframe_memory() {
+        if let Some(s) = storage() {
+            let _ = s.remove_item(EFRAME_MEMORY);
+        }
     }
 }
 
@@ -697,7 +728,9 @@ mod e10 {
 /// binary sizes, correlation); anything else is ignored. Outgoing messages always name the parent
 /// origin as `targetOrigin`, never `*`.
 ///
-/// Handled: `evora:init`, `evora:open` (bytes; the same `docRef` again replaces the document),
+/// Handled: `evora:init` (refused, `forbidden`, when its erasure isn't effective, COL-40), `evora:open`
+/// (bytes, answered once the app has really opened them or failed to, COL-40; the same `docRef` again
+/// replaces the document),
 /// `evora:request-save` (COL-08: `evora:save` with `re`, or `evora:ack` `clean`), `evora:saved`
 /// (COL-09, with `doc.saved-ack` effective: the document counts as saved only on `ok: true` and only
 /// if unchanged since, and the engine then tells its state again, l.480; without it, upstream's
@@ -783,11 +816,26 @@ mod ehp {
         Init { settings: Option<String>, writable: bool, lang: Option<&'static str>, dark: bool, author: Option<String> },
         Lang(Option<&'static str>),
         Theme(bool),
-        /// COL-08: `evora:request-save` `re` for the document named `name`.
-        RequestSave { re: String, name: String },
-        /// S-ACK-6: the host opens again a document it already opened ("reload the server's
-        /// version"): close the tab showing `name`, unsaved work included, before the new bytes open.
-        Replace(String),
+        /// COL-08: `evora:request-save` `re` for the session's document `doc` (`DocId.0`).
+        RequestSave { re: String, doc: u64 },
+        /// `evora:open` `re` (COL-40): the app opens the bytes, then the bridge answers. S-ACK-6: the
+        /// same `docRef` again ("reload the server's version") replaces the document it names.
+        Open(OpenRequest),
+    }
+
+    /// An `evora:open` with bytes, checked, for the app to open on its next frame.
+    pub struct OpenRequest {
+        pub re: String,
+        pub doc_ref: String,
+        pub name: String,
+        pub bytes: Vec<u8>,
+    }
+
+    /// COL-40: a document the host opened, known by the session's id of the document (`DocId.0`),
+    /// never by its name (a local file of the same name would otherwise be saved as it).
+    struct HostDoc {
+        doc: u64,
+        doc_ref: String,
     }
 
     pub type Events = Rc<RefCell<Vec<HostEvent>>>;
@@ -795,12 +843,12 @@ mod ehp {
     /// CI only: commands queued by the smoke test (`window.__evoraRun`), run on the next frame.
     pub type Probe = Rc<RefCell<Vec<String>>>;
 
-    /// An `evora:save` sent and not answered yet: its `id`, the app's ticket, the document's name, and
-    /// whether `doc.saved-ack` was effective (the app then waits for the answer).
+    /// An `evora:save` sent and not answered yet: its `id`, the app's ticket, the session's document,
+    /// and whether `doc.saved-ack` was effective (the app then waits for the answer).
     struct PendingSave {
         id: String,
         ticket: u64,
-        name: String,
+        doc: u64,
         acked: bool,
     }
 
@@ -808,7 +856,6 @@ mod ehp {
         parent: web_sys::Window,
         origin: String,
         ctx: egui::Context,
-        inbox: pdfcraft_ui_egui::Inbox,
         events: Events,
         /// E5: whether, and where, the app may write its settings (`storage_ns::Gate`).
         gate: crate::storage_ns::SharedGate,
@@ -819,8 +866,8 @@ mod ehp {
         caps: Vec<String>,
         max_document: f64,
         storage_ns: Option<String>,
-        /// `(name, docRef)` of the documents the host opened, to tell which one a save is.
-        docs: Vec<(String, String)>,
+        /// The documents the host opened, to tell which one a save is (COL-40: by document, not name).
+        docs: Vec<HostDoc>,
         pending_saves: Vec<PendingSave>,
         /// COL-09: where the app reads the outcome of each acknowledged save (by ticket).
         outcomes: pdfcraft_ui_egui::HostSaveOutcomes,
@@ -849,18 +896,18 @@ mod ehp {
         /// counts it saved once handed over, as upstream does.
         pub fn save_fn(&self) -> pdfcraft_ui_egui::HostSaveAckFn {
             let link = self.clone();
-            Box::new(move |name: &str, bytes: &[u8], save_as: bool| {
+            Box::new(move |doc: u64, name: &str, bytes: &[u8], save_as: bool| {
                 let state = link.state().ok_or_else(|| "Evora is not connected yet".to_string())?;
                 let mut st = state.borrow_mut();
                 if !st.initialized || !st.caps.iter().any(|c| c == "doc.save") {
                     return Err("Evora is not ready to save yet".into());
                 }
-                let found: Vec<String> = st.docs.iter().filter(|(n, _)| n == name).map(|(_, r)| r.clone()).collect();
-                let [doc_ref] = found.as_slice() else {
+                // COL-40: the host's document is the one the host opened in this very tab, never one
+                // found by its name: a local file of the same name is not saved as it.
+                let Some(doc_ref) = st.docs.iter().find(|d| d.doc == doc).map(|d| d.doc_ref.clone()) else {
                     st.request_failure = Some("not_found");
                     return Err("only a document opened from Evora can be saved here".into());
                 };
-                let doc_ref = doc_ref.clone();
                 if bytes.is_empty() {
                     st.request_failure = Some("invalid_content");
                     return Err("the document is empty".into());
@@ -884,7 +931,7 @@ mod ehp {
                 let acked = st.caps.iter().any(|c| c == "doc.saved-ack");
                 st.next_ticket += 1;
                 let ticket = st.next_ticket;
-                st.pending_saves.push(PendingSave { id, ticket, name: name.to_string(), acked });
+                st.pending_saves.push(PendingSave { id, ticket, doc, acked });
                 Ok(acked.then_some(ticket))
             })
         }
@@ -894,6 +941,42 @@ mod ehp {
             if let Some(state) = self.state() {
                 ack(&state.borrow(), re, ok, Some(code));
             }
+        }
+
+        /// COL-40: the session's document that holds the host's document `doc_ref`, if it is open.
+        pub fn doc_of(&self, doc_ref: &str) -> Option<u64> {
+            let state = self.state()?;
+            let st = state.borrow();
+            st.docs.iter().find(|d| d.doc_ref == doc_ref).map(|d| d.doc)
+        }
+
+        /// COL-40, S-ACK-6: the host's document `doc_ref` is no longer open (its tab was closed to be
+        /// replaced).
+        pub fn forget(&self, doc_ref: &str) {
+            if let Some(state) = self.state() {
+                state.borrow_mut().docs.retain(|d| d.doc_ref != doc_ref);
+            }
+        }
+
+        /// COL-40: the answer to `evora:open` `re`, once the app has really opened the bytes (`Ok`:
+        /// the session's document, which `doc_ref` names from then on) or failed to (`Err`: the
+        /// `ackCode`). The state of the opened document follows on the next frame (§7.1 step 8).
+        pub fn opened(&self, re: &str, doc_ref: &str, outcome: Result<u64, &'static str>) {
+            let Some(state) = self.state() else { return };
+            let mut st = state.borrow_mut();
+            match outcome {
+                Ok(doc) => {
+                    st.docs.retain(|d| d.doc_ref != doc_ref && d.doc != doc);
+                    st.docs.push(HostDoc { doc, doc_ref: doc_ref.to_string() });
+                    st.last_dirty = None;
+                    ack(&st, re, true, None);
+                }
+                Err(code) => {
+                    st.docs.retain(|d| d.doc_ref != doc_ref);
+                    ack(&st, re, false, Some(code));
+                }
+            }
+            st.ctx.request_repaint();
         }
 
         /// COL-08: the next `evora:save` answers the host's `evora:request-save` `re`.
@@ -928,8 +1011,8 @@ mod ehp {
                 }
                 st.last_dirty = Some(dirty);
                 let mut fields: Vec<(&str, JsValue)> = vec![("dirty", dirty.into())];
-                if let [(_, doc_ref)] = st.docs.as_slice() {
-                    fields.push(("docRef", doc_ref.clone().into()));
+                if let [only] = st.docs.as_slice() {
+                    fields.push(("docRef", only.doc_ref.clone().into()));
                 }
                 if let Some(payload) = object(&fields) {
                     let _ = send(&st, "evora:dirty", None, &payload, None);
@@ -959,7 +1042,6 @@ mod ehp {
     /// Read `evora-host.json`, find the admitted parent, listen, and announce `evora:ready`.
     pub fn connect(
         link: Link,
-        inbox: pdfcraft_ui_egui::Inbox,
         outcomes: pdfcraft_ui_egui::HostSaveOutcomes,
         events: Events,
         gate: crate::storage_ns::SharedGate,
@@ -973,7 +1055,6 @@ mod ehp {
                 parent,
                 origin,
                 ctx,
-                inbox,
                 events,
                 gate,
                 channel,
@@ -1196,22 +1277,32 @@ mod ehp {
             return;
         }
         // The effective set: what the host offers and this engine declares (§9).
-        st.caps = caps.into_iter().filter(|c| CAPABILITIES.contains(&c.as_str())).collect();
-        st.max_document = max_document;
-        st.initialized = true;
-        let author = author.filter(|_| st.caps.iter().any(|c| c == "author"));
-        let lang = engine_lang.and_then(|l| crate::evora_lang(&l));
+        let caps: Vec<String> = caps.into_iter().filter(|c| CAPABILITIES.contains(&c.as_str())).collect();
         // E5 (§7.1 step 6, §7.7 b), before the answer: this account's settings are read (only with
         // `storage.ns`; otherwise the engine keeps nothing), then every other namespace and every
         // key the engine leaves outside the namespaces is erased and the erasure checked; the
         // engine's other pages of the origin are told, so that those of another namespace stop
         // writing it. The app restores the settings on its next frame and may only then write them,
-        // under this namespace, and only if the erasure was effective; otherwise it stays in memory.
-        st.storage_ns = st.caps.iter().any(|c| c == "storage.ns").then_some(ns);
-        let settings = st.storage_ns.as_deref().and_then(crate::storage_ns::read);
-        crate::storage_ns::announce(st.channel.as_ref(), &crate::storage_ns::Erased::Except(st.storage_ns.as_deref()));
-        let erased = crate::storage_ns::purge_except(st.storage_ns.as_deref());
-        let writable = erased && st.storage_ns.is_some();
+        // under this namespace, and only if the erasure was effective.
+        let storage_ns = caps.iter().any(|c| c == "storage.ns").then_some(ns);
+        let settings = storage_ns.as_deref().and_then(crate::storage_ns::read);
+        crate::storage_ns::announce(st.channel.as_ref(), &crate::storage_ns::Erased::Except(storage_ns.as_deref()));
+        let erased = crate::storage_ns::purge_except(storage_ns.as_deref());
+        // COL-40: an erasure that isn't effective (storage not listed, or a key of another account
+        // survived) refuses the init: the engine stays uninitialised, opens nothing and the host
+        // stops (`init_refused`). A browser that gives the page no storage at all has nothing to
+        // erase: the engine then starts with its settings in memory only.
+        if erased == crate::storage_ns::Erasure::Failed {
+            ack(&st, id, false, Some("forbidden"));
+            return;
+        }
+        st.caps = caps;
+        st.max_document = max_document;
+        st.initialized = true;
+        st.storage_ns = storage_ns;
+        let author = author.filter(|_| st.caps.iter().any(|c| c == "author"));
+        let lang = engine_lang.and_then(|l| crate::evora_lang(&l));
+        let writable = erased == crate::storage_ns::Erasure::Done && st.storage_ns.is_some();
         if writable && let Some(ns) = st.storage_ns.as_deref() {
             st.gate.borrow_mut().name(ns);
         }
@@ -1221,7 +1312,7 @@ mod ehp {
     }
 
     fn on_open(state: &Rc<RefCell<State>>, id: &str, p: &JsValue) {
-        let mut st = state.borrow_mut();
+        let st = state.borrow();
         if !only_keys(p, &["docRef", "name", "bytes", "url", "new"]) {
             return;
         }
@@ -1254,23 +1345,12 @@ mod ehp {
             return;
         }
         let data = js_sys::Uint8Array::new(&bytes).to_vec();
-        if let Ok(mut q) = st.inbox.lock() {
-            q.push((name.clone(), data));
-        } else {
-            ack(&st, id, false, Some("busy"));
-            return;
-        }
-        // S-ACK-6: the same `docRef` again ("reload the server's version", after a conflict)
-        // replaces the document the host opened: its tab closes first, unsaved work included.
-        if let Some((old, _)) = st.docs.iter().find(|(_, r)| *r == doc_ref) {
-            let old = old.clone();
-            st.events.borrow_mut().push(HostEvent::Replace(old));
-        }
-        st.docs.retain(|(n, _)| n != &name);
-        st.docs.push((name, doc_ref));
-        // §7.1 step 8: `evora:ack`, then `evora:dirty` for the opened document, on the next frame.
-        st.last_dirty = None;
-        ack(&st, id, true, None);
+        // COL-40: the app opens the bytes on its next frame (`EvoraApp::open_from_host`), and only then
+        // is `evora:open` answered (`Link::opened`): `{ok: true}` once the document is really open,
+        // `{ok: false, code: "invalid_content"}` for bytes it can't open. S-ACK-6: the same `docRef`
+        // again ("reload the server's version", after a conflict) replaces the document it names,
+        // whose tab closes first, unsaved work included. §7.1 step 8: `evora:dirty` follows the answer.
+        st.events.borrow_mut().push(HostEvent::Open(OpenRequest { re: id.to_string(), doc_ref, name, bytes: data }));
         st.ctx.request_repaint();
     }
 
@@ -1291,18 +1371,18 @@ mod ehp {
             }
         };
         // Without `doc.multi`, a request without `docRef` is for the one document the host opened.
-        let name = match &doc_ref {
-            Some(r) => st.docs.iter().find(|(_, d)| d == r).map(|(n, _)| n.clone()),
+        let doc = match &doc_ref {
+            Some(r) => st.docs.iter().find(|d| d.doc_ref == *r).map(|d| d.doc),
             None => match st.docs.as_slice() {
-                [(n, _)] => Some(n.clone()),
+                [only] => Some(only.doc),
                 _ => None,
             },
         };
-        let Some(name) = name else {
+        let Some(doc) = doc else {
             ack(&st, id, false, Some("not_found"));
             return;
         };
-        st.events.borrow_mut().push(HostEvent::RequestSave { re: id.to_string(), name });
+        st.events.borrow_mut().push(HostEvent::RequestSave { re: id.to_string(), doc });
         st.ctx.request_repaint();
     }
 
@@ -1345,9 +1425,9 @@ mod ehp {
         }
         // §7.3: a Save As answered with the new document's `docRef`; the engine adopts it.
         if let Some(doc_ref) = doc_ref
-            && let Some(entry) = st.docs.iter_mut().find(|(n, _)| *n == save.name)
+            && let Some(entry) = st.docs.iter_mut().find(|d| d.doc == save.doc)
         {
-            entry.1 = doc_ref;
+            entry.doc_ref = doc_ref;
         }
         if let Ok(mut outcomes) = st.outcomes.lock() {
             outcomes.push((save.ticket, ok));
@@ -1417,7 +1497,7 @@ mod ehp {
         crate::storage_ns::announce(st.channel.as_ref(), &told);
         let erased = if all { crate::storage_ns::purge_all() } else { crate::storage_ns::purge_current(st.storage_ns.as_deref()) };
         st.storage_ns = None;
-        if erased {
+        if erased == crate::storage_ns::Erasure::Done {
             ack(&st, id, true, None);
         } else {
             ack(&st, id, false, Some("forbidden"));
@@ -1549,12 +1629,28 @@ struct EvoraApp {
     link: Option<ehp::Link>,
     /// CI only: commands queued by the smoke test (`window.__evoraRun`, `?evora-audit=1`).
     probe: ehp::Probe,
+    /// COL-40: a host document waiting for its password prompt before `evora:open` is answered.
+    pending_open: Option<PendingOpen>,
+}
+
+/// COL-40: an `evora:open` whose bytes raised the password prompt: answered once the document opens,
+/// or once the prompt is gone without it.
+#[cfg(target_arch = "wasm32")]
+struct PendingOpen {
+    re: String,
+    doc_ref: String,
+    /// The session's documents before the open: the new one is the one not among them.
+    before: Vec<u64>,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl EvoraApp {
     fn apply_host_events(&mut self) {
+        self.settle_pending_open();
         let events: Vec<ehp::HostEvent> = std::mem::take(&mut *self.events.borrow_mut());
+        // COL-40: one host open at a time, and never over a password prompt (the prompt belongs to the
+        // document being admitted): the next opens wait, in order, for a later frame.
+        let mut later: Vec<ehp::HostEvent> = Vec::new();
         for event in events {
             match event {
                 ehp::HostEvent::Init { settings, writable, lang, dark, author } => {
@@ -1577,26 +1673,82 @@ impl EvoraApp {
                 }
                 ehp::HostEvent::Lang(lang) => self.inner.language = lang.unwrap_or("en").to_string(),
                 ehp::HostEvent::Theme(dark) => self.set_dark(dark),
-                ehp::HostEvent::RequestSave { re, name } => self.request_save(&re, &name),
-                ehp::HostEvent::Replace(name) => {
-                    while let Some(index) = self.index_of(&name) {
-                        self.inner.close_tab(index);
+                ehp::HostEvent::RequestSave { re, doc } => self.request_save(&re, doc),
+                ehp::HostEvent::Open(open) => {
+                    if self.pending_open.is_some() || self.inner.password_prompt.is_some() || !later.is_empty() {
+                        later.push(ehp::HostEvent::Open(open));
+                    } else {
+                        self.open_from_host(open);
                     }
                 }
             }
         }
+        if !later.is_empty() {
+            let mut queue = self.events.borrow_mut();
+            let newer = std::mem::take(&mut *queue);
+            *queue = later;
+            queue.extend(newer);
+        }
     }
 
-    /// The tab showing the document named `name`, if any.
-    fn index_of(&self, name: &str) -> Option<usize> {
-        self.inner.views.iter().position(|v| self.inner.session.get(v.id).is_some_and(|d| d.name == name))
+    /// The session's documents (`DocId.0`), in tab order.
+    fn doc_ids(&self) -> Vec<u64> {
+        self.inner.views.iter().map(|v| v.id.0).collect()
     }
 
-    /// COL-08: the host's `evora:request-save` `re`, for the document named `name`: `evora:save`
-    /// with `re` when it has unsaved work, `evora:ack {ok: true, code: "clean"}` otherwise.
-    fn request_save(&mut self, re: &str, name: &str) {
+    /// The newest document not among `before`.
+    fn new_doc(&self, before: &[u64]) -> Option<u64> {
+        self.inner.views.iter().map(|v| v.id.0).filter(|d| !before.contains(d)).last()
+    }
+
+    /// The tab showing the session's document `doc`, if any.
+    fn index_of(&self, doc: u64) -> Option<usize> {
+        self.inner.views.iter().position(|v| v.id.0 == doc)
+    }
+
+    /// COL-40: the host's `evora:open`, opened now, and answered only once the document is really
+    /// open (`{ok: true}`), or refused (`invalid_content`: bytes the engine can't open). Encrypted, it
+    /// raises the password prompt and the answer waits for it ([`Self::settle_pending_open`]).
+    fn open_from_host(&mut self, open: ehp::OpenRequest) {
         let Some(link) = self.link.clone() else { return };
-        let Some(index) = self.index_of(name) else {
+        // S-ACK-6: the same `docRef` again ("reload the server's version") replaces the document it
+        // names: its tab closes first, unsaved work included.
+        if let Some(old) = link.doc_of(&open.doc_ref) {
+            while let Some(index) = self.index_of(old) {
+                self.inner.close_tab(index);
+            }
+            link.forget(&open.doc_ref);
+        }
+        let before = self.doc_ids();
+        let opened = self.inner.open_bytes(&open.name, None, open.bytes);
+        match (opened, self.new_doc(&before)) {
+            (Ok(()), Some(doc)) => link.opened(&open.re, &open.doc_ref, Ok(doc)),
+            (Ok(()), None) if self.inner.password_prompt.is_some() => {
+                self.pending_open = Some(PendingOpen { re: open.re, doc_ref: open.doc_ref, before });
+            }
+            _ => link.opened(&open.re, &open.doc_ref, Err("invalid_content")),
+        }
+    }
+
+    /// COL-40: the host document that waited for its password is answered once it opens (`ok`), or
+    /// once the prompt is gone without it (`cancelled`).
+    fn settle_pending_open(&mut self) {
+        let Some(pending) = self.pending_open.take() else { return };
+        let Some(link) = self.link.clone() else { return };
+        if let Some(doc) = self.new_doc(&pending.before) {
+            link.opened(&pending.re, &pending.doc_ref, Ok(doc));
+        } else if self.inner.password_prompt.is_none() {
+            link.opened(&pending.re, &pending.doc_ref, Err("cancelled"));
+        } else {
+            self.pending_open = Some(pending);
+        }
+    }
+
+    /// COL-08: the host's `evora:request-save` `re`, for the session's document `doc`: `evora:save`
+    /// with `re` when it has unsaved work, `evora:ack {ok: true, code: "clean"}` otherwise.
+    fn request_save(&mut self, re: &str, doc: u64) {
+        let Some(link) = self.link.clone() else { return };
+        let Some(index) = self.index_of(doc) else {
             link.answer(re, false, "not_found");
             return;
         };

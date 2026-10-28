@@ -555,11 +555,13 @@ pub type HostSaveFn = Box<dyn Fn(&str, &[u8], bool) -> Result<(), String>>;
 pub type HostDirtyFn = Box<dyn FnMut(bool)>;
 
 /// Evora (EVORA-COL-24, COL-09): hands a saved PDF to a host page that acknowledges saves (the
-/// Evora host protocol's `evora:saved`): `(name, bytes, save_as)`. `Ok(Some(ticket))`: the host
-/// reports the outcome later under `ticket` through [`HostSaveOutcomes`], and the document stays
+/// Evora host protocol's `evora:saved`): `(document, name, bytes, save_as)`. `Ok(Some(ticket))`: the
+/// host reports the outcome later under `ticket` through [`HostSaveOutcomes`], and the document stays
 /// modified until it reports success; `Ok(None)`: this host doesn't acknowledge, and the document
 /// counts as saved once handed over, as with [`HostSaveFn`]. Takes precedence over `host_save`.
-pub type HostSaveAckFn = Box<dyn Fn(&str, &[u8], bool) -> Result<Option<u64>, String>>;
+/// Evora (COL-40): `document` is the session's id of the document saved (`DocId.0`), by which the host
+/// bridge knows which of its documents this is; never its name, which a local file can share.
+pub type HostSaveAckFn = Box<dyn Fn(u64, &str, &[u8], bool) -> Result<Option<u64>, String>>;
 
 /// Evora (COL-09): outcomes of acknowledged saves, `(ticket, ok)`, applied on the next frame.
 pub type HostSaveOutcomes = std::sync::Arc<std::sync::Mutex<Vec<(u64, bool)>>>;
