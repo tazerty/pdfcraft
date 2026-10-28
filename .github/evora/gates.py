@@ -202,6 +202,41 @@ def test_module_lines(lines):
     return skip
 
 
+MOD_DECL = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;\s*$")
+
+
+def test_module_files(paths):
+    """Fichiers de module déclarés `#[cfg(test)] mod nom;` (module de test dans son propre fichier,
+    jamais compilé dans le build web ; EVORA-COL-37, après EVORA-COL-20 pour les modules en ligne).
+
+    Le fichier d'un tel module est `nom.rs` ou `nom/mod.rs` dans le dossier du module parent : celui du
+    fichier pour lib.rs, main.rs et mod.rs, `parent/` pour un fichier `parent.rs`. Seul un fichier qui
+    existe est exclu, et seulement s'il n'est déclaré nulle part sans `#[cfg(test)]` : la porte reste
+    fermée par défaut.
+    """
+    tests, plain = set(), set()
+    for path in paths:
+        if not path.endswith(".rs"):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+        stem = os.path.splitext(os.path.basename(path))[0]
+        base = os.path.dirname(path) if stem in ("lib", "main", "mod") else os.path.join(os.path.dirname(path), stem)
+        for n, line in enumerate(lines):
+            d = MOD_DECL.match(line)
+            if not d:
+                continue
+            j = n - 1
+            attrs = []
+            while j >= 0 and lines[j].strip().startswith("#["):
+                attrs.append(lines[j].strip())
+                j -= 1
+            for candidate in (os.path.join(base, d.group(2) + ".rs"), os.path.join(base, d.group(2), "mod.rs")):
+                if os.path.exists(candidate):
+                    (tests if "#[cfg(test)]" in attrs else plain).add(os.path.normpath(candidate))
+    return tests - plain
+
+
 def scan_sources(repo, ignored=None):
     """{(fichier, caractère): occurrences} dans le code d'interface, commentaires exclus.
 
@@ -210,12 +245,17 @@ def scan_sources(repo, ignored=None):
     """
     hits = {}
     for d in UI_SOURCE_DIRS:
-        for path in walk_files(os.path.join(repo, d)):
+        paths = list(walk_files(os.path.join(repo, d)))
+        test_files = test_module_files(paths)
+        for path in paths:
             if not path.endswith((".rs", ".html")):
                 continue
             with open(path, encoding="utf-8") as fh:
                 lines = fh.readlines()
-            skip = test_module_lines(lines) if path.endswith(".rs") else set()
+            if os.path.normpath(path) in test_files:
+                skip = set(range(len(lines)))
+            else:
+                skip = test_module_lines(lines) if path.endswith(".rs") else set()
             for n, line in enumerate(lines):
                 if line.lstrip().startswith("//"):
                     continue
