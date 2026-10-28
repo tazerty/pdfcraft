@@ -56,6 +56,12 @@ Scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
      clavier (evora:focus-out) [fin-focus-out] ; signatures, paraphes et certificats jamais écrits dans le stockage
      [fin-signatures]. Ses sept détecteurs, et eux seuls, rougissent sous le témoin groupé du lot (FIN_EXPECTED). Le
      premier catalogue reçu est écrit dans le fichier nommé par EVORA_COMMANDS_OUT : le commands.json de l'artefact.
+     Correction 1 du lot (EVORA-COL-49 et -50, avenant du 2026-10-27 §5) : toute commande de ce catalogue dont
+     l'identifiant ou le libellé porte un marqueur de retrait est destructive, sauf exception justifiée une par une
+     [fin-retraits] ; les destructives ajoutées (couper des pages, retirer la signature ou les initiales
+     enregistrées, réinitialiser la disposition des panneaux) sont refusées sans confirmed, sans effet
+     [fin-destructive]. Ces deux détecteurs, et eux seuls, rougissent sous le témoin de la correction
+     (FIN_FIX_EXPECTED).
 
 Le témoin « pont-ehp-temoin » (scénario 6) cache aussi au moteur, depuis EVORA-COL-39, les clés qu'il croit
 avoir effacées (length, key()) : sa vérification passe, il ne refuse donc pas evora:init, et le banc garde
@@ -2282,8 +2288,13 @@ def run_chiffre(ev, page, engine, state, wait, settle, answer, saves, ctrl_s, pr
 #  [fin-liste-blanche] evora:command d'une commande hors catalogue (FIN_REFUSED) : {ok: false, code: capability} ;
 #  [fin-params] page.rotate avec des paramètres (dont une chaîne de chemin) : {ok: false, code: invalid_content} et
 #     aucun effet (aucun evora:dirty vrai) ; prémisse : page.rotate {} agit (evora:dirty vrai) ;
-#  [fin-destructive] page.delete sans confirmed : {ok: false, code: forbidden} et aucun effet ; avec confirmed: true :
-#     {ok: true} et le document modifié ;
+#  [fin-retraits] (correction 1, avenant §5) le catalogue livré (commands.json, en français), commande par commande :
+#     un marqueur de retrait (FIN_RETRAIT_ID sur l'identifiant, FIN_RETRAIT_LABEL sur le libellé) exige le drapeau
+#     destructif, sauf exception justifiée une par une (FIN_RETRAIT_EXCEPTIONS) ; une exception absente du catalogue,
+#     sans marqueur ou déjà destructive est périmée ;
+#  [fin-destructive] page.delete et les destructives ajoutées par la correction 1 (FIN_DESTRUCTIVE_PROBES) sans
+#     confirmed : {ok: false, code: forbidden} chacune et aucun effet ; page.delete avec confirmed: true : {ok: true}
+#     et le document modifié ;
 #  [fin-export] export.docx et export.html : un evora:export chacun (nom, type MIME du format, docRef du document de la
 #     coquille, octets), et AUCUN téléchargement du navigateur (FIN_EARLY relève tout lien de téléchargement cliqué
 #     dans le moteur, et le retient : rien ne part) ;
@@ -2292,7 +2303,8 @@ def run_chiffre(ev, page, engine, state, wait, settle, answer, saves, ctrl_s, pr
 #     par une séance précédente dans l'espace du compte (repère « SABORDAGE QA »), ils n'y sont plus après
 #     l'enregistrement des réglages qui suit evora:init (prémisse : réglages réécrits, auteur de la coquille).
 # Ses sept détecteurs, et eux seuls, rougissent sous le témoin groupé du lot COL-FK-B2 (défauts réintroduits dans le
-# moteur, puis retirés : FIN_EXPECTED).
+# moteur, puis retirés : FIN_EXPECTED) ; [fin-retraits] et [fin-destructive], et eux seuls, sous le témoin de sa
+# correction 1 (FIN_FIX_EXPECTED).
 FIN_DOC = "01JX" + "F" * 20 + "D1"
 FIN_NAME = "evora-finitions.pdf"
 FIN_MARK = "SABORDAGE QA"
@@ -2313,6 +2325,25 @@ FIN_OFF = ("page.combine", "view.theme", "view.theme.system", "view.theme.light"
 FIN_PRESENT = {"page.rotate": False, "page.delete": True, "form.clear": True, "comment.flatten": True,
                "export.docx": False, "export.html": False, "comment.export": False, "edit.undo": False,
                "print.dialog": False}
+# Correction 1 du lot (avenant §5) : marqueurs de retrait, sur l'identifiant (anglais, en tête d'un segment) et sur le
+# libellé du catalogue livré (français, en tête d'un mot) : suppressions, coupes, aplatissements, retraits,
+# effacements, réinitialisations et leurs équivalents.
+FIN_RETRAIT_ID = re.compile(r"(?:^|[._-])(?:delete|remove|cut|clear|flatten|reset|discard|eras|purge|wipe|strip|"
+                            r"trash|destroy|redact|sanitiz|revert|crop)", re.I)
+FIN_RETRAIT_LABEL = re.compile(r"\b(?:supprim|retir|enl[eè]v|coup|découp|effac|aplati|réinitialis|vider|vidage|"
+                               r"abandonn|gomm|écras|purg|caviard|nettoy|rogn)", re.I)
+# Exceptions justifiées une par une, écrites ici indépendamment de host_commands.rs.
+FIN_RETRAIT_EXCEPTIONS = {
+    "comment.eraser": "Effacer les dessins choisit l'outil gomme : rien n'est effacé avant que le membre frotte la page, "
+                      "et chaque effacement est un pas que Annuler reprend",
+    "page.crop": "Rogner les pages choisit l'outil de rognage : rien ne change avant que le membre trace un cadre, et "
+                 "un rognage pose une zone de page (le contenu reste) que Annuler reprend",
+}
+# Refusées sans confirmed, sans effet : page.delete, puis les destructives ajoutées par la correction 1.
+FIN_DESTRUCTIVE_PROBES = ("page.delete", "page.cut", "sign.fill.signature.remove", "sign.fill.initials.remove",
+                          "ui.dock.reset")
+# Sous le témoin de la correction 1 du lot (EVORA-COL-51) : ces détecteurs, et eux seuls.
+FIN_FIX_EXPECTED = {"fin-retraits", "fin-destructive"}
 FIN_REFUSED = ("file.save", "file.close", "file.revert", "help.about", "app.preferences", "create.blank", "page.combine",
                "view.theme.dark", "redact.mark", "sign.digital", "evora.inconnue")
 FIN_EXPORTS = (("export.docx", ".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
@@ -2517,6 +2548,45 @@ def fin_selftest():
     return judge_catalog(sane, "fr") == [] and all(judge_catalog(c, "fr") for c in cases) and judge_catalog(None, "fr")
 
 
+def removal_marked(c):
+    """Une entrée du catalogue porte-t-elle un marqueur de retrait (identifiant ou libellé) ?"""
+    return isinstance(c, dict) and bool(FIN_RETRAIT_ID.search(str(c.get("id", "")))
+                                        or FIN_RETRAIT_LABEL.search(str(c.get("label", ""))))
+
+
+def judge_removals(p):
+    """Avenant §5, point 2 : les commandes du catalogue livré qui portent un marqueur de retrait sans drapeau
+    destructif ni exception justifiée, et les exceptions périmées. Sans catalogue, le contrôle ne peut pas se taire."""
+    cmds = p.get("commands") if isinstance(p, dict) else None
+    if not isinstance(cmds, list) or not cmds:
+        return ["catalogue absent : contrôle des marqueurs de retrait impossible"]
+    entries = {str(c.get("id")): c for c in cmds if isinstance(c, dict)}
+    unflagged = [f"{i} ({c.get('label')!r})" for i, c in entries.items()
+                 if removal_marked(c) and c.get("destructive") is not True and i not in FIN_RETRAIT_EXCEPTIONS]
+    stale = [i for i in FIN_RETRAIT_EXCEPTIONS
+             if i not in entries or not removal_marked(entries[i]) or entries[i].get("destructive") is True]
+    problems = []
+    if unflagged:
+        problems.append(f"marqueur de retrait sans drapeau destructif ni exception justifiée : {unflagged}")
+    if stale:
+        problems.append(f"exceptions périmées (absentes, sans marqueur ou déjà destructives) : {stale}")
+    return problems
+
+
+def removal_selftest():
+    """Le contrôle des marqueurs de retrait se tait sur un catalogue sain et signale chaque défaut connu : marqueur
+    dans l'identifiant seul, dans le libellé seul, drapeau retiré, exception périmée, catalogue absent."""
+    def cat(entries):
+        cmds = [{"id": i, "label": label, "enabled": True, "destructive": d} for i, label, d in entries]
+        return {"lang": "fr", "count": len(cmds), "hash": fin_hash(cmds), "commands": cmds}
+    base = [("page.delete", "Supprimer des pages", True), ("page.rotate", "Pivoter les pages", False),
+            ("comment.eraser", "Effacer les dessins", False), ("page.crop", "Rogner les pages", False)]
+    cases = [base + [("page.cut", "Pages", False)], base + [("edit.tout", "Retirer tout", False)],
+             [(i, label, False) for i, label, _ in base], [e for e in base if e[0] != "comment.eraser"],
+             [(i, label, d or i == "page.crop") for i, label, d in base]]
+    return judge_removals(cat(base)) == [] and all(judge_removals(cat(c)) for c in cases) and bool(judge_removals(None))
+
+
 def run_finitions(chrome, page, contexts, result, errors):
     """COL-42 et COL-43 (lot COL-FK-B2) : un détecteur par finition (voir FIN_EXPECTED et l'en-tête du scénario)."""
     own = NS_PREFIX + NS_OWN
@@ -2589,6 +2659,8 @@ def run_finitions(chrome, page, contexts, result, errors):
 
     if not fin_selftest():
         errors.append("[banc] juge du catalogue muet : un défaut connu n'est pas signalé (autotest)")
+    if not removal_selftest():
+        errors.append("[banc] contrôle des marqueurs de retrait muet : un défaut connu n'est pas signalé (autotest)")
     end = time.monotonic() + READY_TIMEOUT
     found = engine()
     while found is None and time.monotonic() < end:
@@ -2632,6 +2704,13 @@ def run_finitions(chrome, page, contexts, result, errors):
         fin["catalogue_fr"]["ecrit"] = os.environ["EVORA_COMMANDS_OUT"]
     if problems:
         errors.append(f"[fin-catalogue] evora:commands après evora:init : {'; '.join(problems)}")
+
+    # [fin-retraits] (avenant §5) : le catalogue livré, commande par commande, contre les marqueurs de retrait.
+    removals = judge_removals(cat_fr)
+    fin["retraits"] = {"marquees": [c.get("id") for c in (cat_fr or {}).get("commands") or [] if removal_marked(c)],
+                       "exceptions": sorted(FIN_RETRAIT_EXCEPTIONS), "ecarts": removals}
+    if removals:
+        errors.append(f"[fin-retraits] commands.json : {'; '.join(removals)}")
 
     # Le document de la coquille (deux pages).
     if not reopen("initiale"):
@@ -2729,11 +2808,12 @@ def run_finitions(chrome, page, contexts, result, errors):
         errors.append(f"[fin-params] page.rotate {{}} : accusé {ok_rotate}, document modifié {bool(dirty(st, m2, True))} "
                       "(attendu : {ok: true}, puis evora:dirty vrai)")
 
-    # [fin-destructive] : page.delete sans confirmed refusé sans effet ; avec confirmed: true, exécuté.
+    # [fin-destructive] : page.delete et les destructives ajoutées par la correction 1 sans confirmed refusées sans
+    # effet ; page.delete avec confirmed: true, exécutée.
     if not reopen("destructive"):
         return
     m = mark()
-    _, unconfirmed = command("page.delete", {})
+    unconfirmed = {cmd: command(cmd, {})[1] for cmd in FIN_DESTRUCTIVE_PROBES}
     settle(2.0)
     early_dirty = dirty(state(), m, True)
     m2 = mark()
@@ -2741,9 +2821,11 @@ def run_finitions(chrome, page, contexts, result, errors):
     st = wait(lambda s: dirty(s, m2, True), 10)
     fin["destructive"] = {"sans_confirmation": unconfirmed, "dirty_vrai_apres_refus": len(early_dirty),
                           "avec_confirmation": confirmed, "dirty_vrai_apres": len(dirty(st, m2, True))}
-    if unconfirmed != {"ok": False, "code": "forbidden"} or early_dirty:
-        errors.append(f"[fin-destructive] page.delete sans confirmed : accusé {unconfirmed}, document modifié "
-                      f"{bool(early_dirty)} (attendu : forbidden, sans effet)")
+    ran = {c: a for c, a in unconfirmed.items() if a != {"ok": False, "code": "forbidden"}}
+    if ran or early_dirty:
+        errors.append(f"[fin-destructive] sans confirmed : accusés hors forbidden {ran}, document modifié "
+                      f"{bool(early_dirty)} (attendu : forbidden pour chacune de {list(FIN_DESTRUCTIVE_PROBES)}, "
+                      "sans effet)")
     elif confirmed != {"ok": True} or not dirty(st, m2, True):
         errors.append(f"[fin-destructive] page.delete avec confirmed : accusé {confirmed}, document modifié "
                       f"{bool(dirty(st, m2, True))} (attendu : {{ok: true}}, puis evora:dirty vrai)")
@@ -2943,10 +3025,11 @@ def main(argv):
                     f"sa correction 1 : {sorted(ROB_FIX_EXPECTED)})")
             if "finitions" in r:
                 log(f"- {r['scenario']} : finitions du pont (COL-42, COL-43) : "
-                    + json.dumps({k: v for k, v in r["finitions"].items() if k != "messages"}, ensure_ascii=False)[:3200])
+                    + json.dumps({k: v for k, v in r["finitions"].items() if k != "messages"}, ensure_ascii=False)[:4800])
                 log(f"- {r['scenario']} : échanges (fin) : " + json.dumps(r["finitions"].get("messages", []), ensure_ascii=False)[:2400])
                 log(f"- {r['scenario']} : étiquettes rouges : {sorted(error_tags(r['errors']))} "
-                    f"(sous le témoin groupé du lot COL-FK-B2, attendues : {sorted(FIN_EXPECTED)})")
+                    f"(sous le témoin groupé du lot COL-FK-B2, attendues : {sorted(FIN_EXPECTED)} ; sous celui de "
+                    f"sa correction 1 : {sorted(FIN_FIX_EXPECTED)})")
             if "witness_ok" in r:
                 log(f"- {r['scenario']} : témoin sabordé ({r['sabotage_desc']}) ; "
                     f"détecteurs déclenchés {r['tags']} ; attendus {r['expected_red']} ; "
