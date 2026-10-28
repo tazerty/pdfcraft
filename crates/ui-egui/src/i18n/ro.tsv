@@ -612,7 +612,6 @@
 	From {file}	Din {file}
 	From:	De la:
 	Front side only	Doar față
-	Get help, share feedback and follow development on Discord.	Primiți ajutor, trimiteți păreri și urmăriți dezvoltarea pe Discord.
 	Go to a page view	Salt la o vizualizare de pagină
 	Go to page {p}	Salt la pagina {p}
 	Go to the page	Salt la pagină
@@ -664,8 +663,6 @@
 	JavaScript Console	Consolă JavaScript
 	JavaScript is turned off (Preferences ▸ JavaScript).	JavaScript este dezactivat (Preferințe > JavaScript).
 	JavaScript, e.g. getField("total").value	JavaScript, de ex. getField("total").value
-	Join our Discord	Intrați pe Discord-ul nostru
-	Join the ArtCraft community	Alăturați-vă comunității ArtCraft
 	Justify	Aliniere stânga-dreapta
 	Keep source fonts	Păstrare fonturi sursă
 	Keep tool selected	Instrumentul rămâne selectat
@@ -1336,7 +1333,6 @@
 	Archive documents	Arhivare documente
 	Area	Arie
 	Arrow	Săgeată
-	ArtCraft website	Site-ul ArtCraft
 	Ask about this document	Întrebări despre acest document
 	Attach a file	Atașare fișier
 	Attach file	Atașare fișier
@@ -1475,7 +1471,6 @@
 	Insert text	Inserare text
 	JavaScript	JavaScript
 	JavaScript console…	Consolă JavaScript…
-	Join the ArtCraft Discord	Intrați pe Discord-ul ArtCraft
 	Light gray	Gri deschis
 	Line	Linie
 	Link	Link
@@ -1507,7 +1502,6 @@
 	Page transitions	Tranziții pagini
 	Paste pages	Lipire pagini
 	PdfCraft on GitHub	PdfCraft pe GitHub
-	PdfCraft web page	Pagina web PdfCraft
 	Perimeter	Perimetru
 	Pin folder to Home…	Fixare folder în Acasă…
 	PostScript / EPS	PostScript / EPS

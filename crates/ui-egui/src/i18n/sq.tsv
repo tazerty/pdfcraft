@@ -229,7 +229,6 @@
 	Archive documents	Arkivo dokumentet
 	Area	Sipërfaqja
 	Arrow	Shigjetë
-	ArtCraft website	Faqja e internetit e ArtCraft
 	Ask about this document	Pyet për këtë dokument
 	Asks GitHub for the latest release. Nothing is downloaded or installed automatically.	I kërkon GitHub-it versionin më të fundit. Asgjë nuk shkarkohet ose instalohet automatikisht.
 	Associated with content	E lidhur me përmbajtjen
@@ -871,7 +870,6 @@
 	Full screen mode	Modaliteti me ekran të plotë
 	General	Të përgjithshme
 	Geospatial location	Vendndodhja gjeohapësinore
-	Get help, share feedback and follow development on Discord.	Merr ndihmë, ndaj komente dhe ndiq zhvillimin në Discord.
 	Go to a page view	Shko te një pamje faqeje
 	Go to page {p}	Shko te faqja {p}
 	Go to page…	Shko te faqja…
@@ -977,9 +975,6 @@
 	JavaScript console…	Konsola JavaScript…
 	JavaScript is turned off (Preferences ▸ JavaScript).	JavaScript është çaktivizuar (Preferencat > JavaScript).
 	JavaScript, e.g. getField("total").value	JavaScript, p.sh. getField("total").value
-	Join our Discord	Bashkohu me Discord-in tonë
-	Join the ArtCraft Discord	Bashkohu me Discord-in e ArtCraft
-	Join the ArtCraft community	Bashkohu me komunitetin e ArtCraft
 	July	Korrik
 	June	Qershor
 	Justify	Drejto në të dyja anët
@@ -1312,7 +1307,6 @@
 	Patterns (graphics objects)	Modelet (objekte grafike)
 	PdfCraft didn't shut down normally. These documents had changes that were autosaved:	PdfCraft nuk u mbyll normalisht. Këta dokumente kishin ndryshime të ruajtura automatikisht:
 	PdfCraft on GitHub	PdfCraft në GitHub
-	PdfCraft web page	Faqja ueb e PdfCraft
 	PdfCraft works offline. No telemetry, no account, and no cloud processing unless you add a provider.	PdfCraft funksionon pa internet. Pa telemetri, pa llogari dhe pa përpunim në re, përveçse nëse shton një ofrues.
 	PdfCraft {c} is up to date.	PdfCraft {c} është i përditësuar.
 	PdfCraft {v} is available.	PdfCraft {v} është i disponueshëm.

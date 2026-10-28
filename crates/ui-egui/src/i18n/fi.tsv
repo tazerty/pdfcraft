@@ -91,7 +91,6 @@
 	Side panels	Sivupaneelit
 	Enable Acrobat JavaScript	Ota Acrobat JavaScript käyttöön
 	OK	OK
-	Join our Discord	Liity Discordiimme
 	Close	Sulje
 	Next / previous match	Seuraava / edellinen osuma
 	Copy selected text	Kopioi valittu teksti
@@ -161,8 +160,6 @@
 	Current page — type a page number or label (such as iv) and press Enter	Nykyinen sivu – kirjoita sivunumero tai -tunniste (kuten iv) ja paina Enter
 	Welcome to PdfCraft	Tervetuloa PdfCraftiin
 	An open-source PDF workbench — local, private, and scriptable.	Avoimen lähdekoodin PDF-työpöytä – paikallinen, yksityinen ja skriptattava.
-	Join the ArtCraft community	Liity ArtCraft-yhteisöön
-	Get help, share feedback and follow development on Discord.	Hae apua, anna palautetta ja seuraa kehitystä Discordissa.
 	Recommended tools	Suositellut työkalut
 	Use now	Käytä nyt
 	Open file	Avaa tiedosto
@@ -307,10 +304,7 @@
 	Split document…	Jaa asiakirja…
 	Number pages…	Numeroi sivut…
 	Keyboard shortcuts	Pikanäppäimet
-	Join the ArtCraft Discord	Liity ArtCraftin Discordiin
-	PdfCraft web page	PdfCraftin verkkosivu
 	PdfCraft on GitHub	PdfCraft GitHubissa
-	ArtCraft website	ArtCraftin verkkosivusto
 	Check for updates…	Tarkista päivitykset…
 	About PdfCraft	Tietoja PdfCraftista
 	Export a PDF	Vie PDF
