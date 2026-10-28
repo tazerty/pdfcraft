@@ -77,9 +77,12 @@ fn main() {
                         app.host_dirty = Some(link.dirty_fn());
                         // COL-42: under the bridge the browser downloads nothing; every file the app
                         // would download goes to the host (`evora:export`), or is refused.
-                        PdfCraftApp::set_host_export(Some(link.export_fn()));
+                        // SABORDAGE QA (EVORA-COL-47) S4 : aucun relais d'export, le navigateur télécharge.
+                        PdfCraftApp::set_host_export(None);
+                        let _ = link.export_fn();
                         // COL-42: F6 gives the keyboard back to the host (`ui.focus-out`).
-                        ehp::listen_exit_key(link.clone());
+                        // SABORDAGE QA (EVORA-COL-47) S5 : F6 n'est plus écoutée.
+                        let _ = ehp::listen_exit_key as fn(ehp::Link);
                         let outcomes = app.host_save_outcomes.clone();
                         ehp::connect(link.clone(), outcomes, events.clone(), shared.clone(), cc.egui_ctx.clone());
                         // CI only (`?evora-audit=1`): the smoke test edits the document (`window.__evoraRun`).
@@ -2138,7 +2141,8 @@ impl eframe::App for EvoraApp {
             Some(gate) => {
                 let key = gate.borrow().key();
                 if let Some(key) = key
-                    && let Some(settings) = storage_ns::without_identity(&self.inner.persist())
+                    // SABORDAGE QA (EVORA-COL-47) S6 : réglages écrits avec signatures, paraphes et certificats.
+                    && let Some(settings) = Some(self.inner.persist())
                 {
                     storage.set_string(&key, settings);
                 }
@@ -2173,7 +2177,9 @@ impl eframe::App for EvoraApp {
         self.hold_local_opens();
         eframe::App::logic(&mut self.inner, ctx, frame);
         // COL-43: the catalog, once the host's language is applied (`evora:init`, `evora:lang`).
+        // SABORDAGE QA (EVORA-COL-47) S7 : catalogue jamais émis.
         if std::mem::take(&mut self.catalog_due)
+            && false
             && let Some(link) = &self.link
         {
             let (entries, lang, hash) = host_commands::catalog(&self.inner);

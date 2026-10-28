@@ -127,13 +127,16 @@ pub fn run(app: &mut PdfCraftApp, id: &str, params_empty: bool, confirmed: bool)
     let enabled = app
         .evora_commands()
         .into_iter()
-        .find(|(c, ..)| *c == id && admitted(c))
+        // SABORDAGE QA (EVORA-COL-47) S1 : liste blanche élargie, une commande hors catalogue s'exécute.
+        .find(|(c, ..)| *c == id)
         .map(|(_, _, _, enabled)| enabled)
         .ok_or("capability")?;
-    if !params_empty {
+    // SABORDAGE QA (EVORA-COL-47) S2 : paramètres admis sans contrôle.
+    if false && !params_empty {
         return Err("invalid_content");
     }
-    if DESTRUCTIVE.contains(&id) && !confirmed {
+    // SABORDAGE QA (EVORA-COL-47) S3 : commande destructive exécutée sans confirmed.
+    if false && DESTRUCTIVE.contains(&id) && !confirmed {
         return Err("forbidden");
     }
     if !enabled || !app.execute(id) {
