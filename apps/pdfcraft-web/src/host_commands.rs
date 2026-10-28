@@ -15,7 +15,12 @@
 //! - **No free parameter.** No command declares one, so `params` must be `{}`; anything else is
 //!   refused (`invalid_content`), and a path or a URL can never reach the engine.
 //! - **Destructive commands** ([`DESTRUCTIVE`]) run only with `confirmed: true` (Evora asked the
-//!   member first, Evora's decision D-24); `forbidden` otherwise.
+//!   member first, Evora's decision D-24); `forbidden` otherwise. Under the same amendment, section 5,
+//!   a command is destructive when it removes content or a setting of the member's, or when Undo
+//!   cannot give its effect back: deletions, cuts, flattenings, removals, erasures, resets. The list
+//!   is proved by Evora's CI bench, which reads the delivered catalog and fails on any command whose
+//!   id or label carries a removal word without the destructive flag, outside the bench's own list
+//!   of exceptions, each one justified there.
 
 use pdfcraft_ui_egui::PdfCraftApp;
 
@@ -31,9 +36,17 @@ const FILE_ADMITTED: [&str; 0] = [];
 /// (`evora:theme`).
 const OFF_CATALOG: [&str; 5] = ["page.combine", "view.theme", "view.theme.system", "view.theme.light", "view.theme.dark"];
 
-/// Run only with `confirmed: true`: each removes or flattens content of the document in one go.
-/// Edit, Undo still gives it back during the session, but an autosave would keep the loss.
-pub const DESTRUCTIVE: [&str; 9] = [
+/// Run only with `confirmed: true`. The first nine remove or flatten content of the document in
+/// one go (Edit, Undo still gives it back during the session, but an autosave would keep the loss).
+/// The last four, added by the first correction of Evora's lot COL-FK-B2 (amendment, section 5):
+/// Cut pages removes the pages it copies; removing the saved signature or initials loses them for
+/// good, since they live in memory only under the bridge and Undo does not bring them back; Reset
+/// panel layout throws away the member's arrangement of the panels, which Undo does not restore.
+///
+/// Not destructive although their name carries a removal word (the bench's exceptions): Erase
+/// drawings (`comment.eraser`) and Crop pages (`page.crop`) only pick a tool; nothing changes until
+/// the member drags on a page, and each stroke or crop is then one step that Undo takes back.
+pub const DESTRUCTIVE: [&str; 13] = [
     "page.delete",
     "form.clear",
     "comment.flatten",
@@ -43,6 +56,10 @@ pub const DESTRUCTIVE: [&str; 9] = [
     "edit.watermark.remove",
     "edit.background.remove",
     "protect.remove",
+    "page.cut",
+    "sign.fill.signature.remove",
+    "sign.fill.initials.remove",
+    "ui.dock.reset",
 ];
 
 /// `label` and each item of `path` (HOST-PROTOCOL.md section 9.1): 1 to 200 UTF-16 code units.
