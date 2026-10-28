@@ -413,13 +413,27 @@ jobs:
       - name: Test de fumée Chrome, origine croisée (bloquant)
         env:
           PKG: ${{ steps.pkg.outputs.pkg }}
+          OUT: ${{ steps.pkg.outputs.out }}
           REPORT: ${{ steps.meta.outputs.report }}
           # E9 et E10 vérifiés au rendu : le moteur audite chaque texte dessiné (window.__evoraAudit).
           EVORA_SMOKE_QUERY: "?evora-audit=1"
+          # EVORA-COL-46 (COL-43) : le premier catalogue de commandes reçu par « pont-finitions »
+          # (evora:commands, en français) est le commands.json de l'artefact (DT-S17 d'Evora).
+          EVORA_COMMANDS_OUT: ${{ steps.pkg.outputs.out }}/commands.json
         run: |
           set -euo pipefail
           google-chrome --version
           python3 -I .github/evora/smoke.py "$PKG" "$PKG/csp-hashes.txt" "$GITHUB_WORKSPACE/evora-ci/smoke" "$REPORT"
+          # EVORA-COL-46 : commands.json de l'artefact, empreinte ajoutée à SHA256SUMS.
+          if [ ! -s "$OUT/commands.json" ]; then echo "::error::commands.json absent : aucun catalogue reçu par « pont-finitions »"; exit 1; fi
+          (cd "$OUT" && sha256sum commands.json >> SHA256SUMS)
+          python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print("::notice::commands.json : %d commandes, empreinte %s, langue %s" % (d["count"], d["hash"], d["lang"]))' "$OUT/commands.json"
+          {
+            echo "### Catalogue de commandes (commands.json, COL-43)"
+            echo
+            echo "\`commands.json\` : $(stat -c %s "$OUT/commands.json") octets, SHA-256 \`$(sha256sum "$OUT/commands.json" | cut -d' ' -f1)\`."
+            echo
+          } >> "$REPORT"
 
       - name: Rapport des portes
         if: always()

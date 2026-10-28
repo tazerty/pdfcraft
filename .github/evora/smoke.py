@@ -48,6 +48,14 @@ Scénarios, chacun sur un profil Chrome vierge (démarrage à froid) :
      de la coquille est acquitté et le fichier déposé s'ouvre ensuite [rob-chiffre-mdp]. Le premier, et lui
      seul, rougit sous le témoin de la correction (liaison au « plus récent document » et dépôt non retenu
      réintroduits, puis retirés : ROB_FIX_EXPECTED).
+ 13. « pont-finitions » (COL-42, COL-43, lot COL-FK-B2) : un moteur, un détecteur par finition : catalogue de
+     commandes (evora:commands) conforme et en liste blanche par construction, réémis à chaque langue
+     [fin-catalogue] ; commande hors catalogue refusée [fin-liste-blanche] ; paramètres, dont un chemin, refusés
+     sans effet [fin-params] ; commande destructive refusée sans confirmed, exécutée avec [fin-destructive] ;
+     exports vers la coquille (evora:export, type MIME du format), aucun téléchargement [fin-export] ; F6 rend le
+     clavier (evora:focus-out) [fin-focus-out] ; signatures, paraphes et certificats jamais écrits dans le stockage
+     [fin-signatures]. Ses sept détecteurs, et eux seuls, rougissent sous le témoin groupé du lot (FIN_EXPECTED). Le
+     premier catalogue reçu est écrit dans le fichier nommé par EVORA_COMMANDS_OUT : le commands.json de l'artefact.
 
 Le témoin « pont-ehp-temoin » (scénario 6) cache aussi au moteur, depuis EVORA-COL-39, les clés qu'il croit
 avoir effacées (length, key()) : sa vérification passe, il ne refuse donc pas evora:init, et le banc garde
@@ -112,7 +120,9 @@ ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$")
 CAPABILITY_NAMES = {"doc.open", "doc.save", "doc.saved-ack", "doc.dirty", "doc.multi", "doc.request-save",
                     "export.drive", "media.need", "media.ranges", "pick.drive", "command", "storage.ns",
-                    "storage.memory", "storage.purge", "live.lang", "live.theme", "font.inject", "author"}
+                    "storage.memory", "storage.purge", "live.lang", "live.theme", "font.inject", "author",
+                    # Plafond de la coquille d'Evora (host-schema.js, CAPABILITIES) : extensions de §9.1.
+                    "ui.focus-out", "ui.activity", "drop.files", "prefs.sync", "command.catalog"}
 # Charges utiles admises du moteur vers la coquille : (champs obligatoires, champs permis), §4.4-§4.5.
 PAYLOAD_KEYS = {
     "evora:ready": ({"app", "version", "ehp", "capabilities"}, {"app", "version", "ehp", "capabilities"}),
@@ -120,6 +130,10 @@ PAYLOAD_KEYS = {
     "evora:dirty": ({"dirty"}, {"dirty", "docRef"}),
     "evora:save": ({"docRef", "name", "saveAs", "bytes"}, {"docRef", "name", "saveAs", "bytes"}),
     "evora:failed": ({"code"}, {"code"}),
+    # COL-42 et COL-43 (lot COL-FK-B2) : export vers Drive, sortie clavier, catalogue de commandes.
+    "evora:export": ({"name", "mime", "bytes"}, {"docRef", "name", "mime", "bytes"}),
+    "evora:focus-out": (set(), set()),
+    "evora:commands": ({"lang", "count", "hash", "commands"}, {"lang", "count", "hash", "params", "commands"}),
 }
 IFRAME_W, IFRAME_H = 1280, 800
 # Paramètres de l'URL du moteur dans l'iframe. Avant le pont EHP natif (E4), aucun : le pont amont
@@ -615,10 +629,11 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
     host = bool(expect.get("ehp"))
     multi = bool(expect.get("instances"))
     robust = bool(expect.get("robustesse"))
+    fin = bool(expect.get("finitions"))
     no_listeners = "no-listeners" in expect.get("sabotage", "").split()
     engine = start_server(PORT_A, "127.0.0.1", directory=site, csp=csp, served=served,
                           host_config={"parentOrigins": [PARENT_ORIGIN]} if host else None)
-    body = parent_page_multi(query) if multi else parent_page_rob(query) if robust \
+    body = parent_page_multi(query) if multi else parent_page_rob(query) if robust else parent_page_fin(query) if fin \
         else parent_page(query, host, ACK_HARNESS if expect.get("accuse") else None)
     parent = start_server(PORT_B, "127.0.0.1", page=body, served=served)
     # « localhost » peut se résoudre en ::1 : la page parente écoute aussi en IPv6 quand c'est possible.
@@ -661,6 +676,9 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
                     if robust:
                         # COL-40 : mémoire d'eframe semée et lectures journalisées avant le .wasm.
                         chrome.send("Runtime.evaluate", {"expression": ROB_EARLY, "contextId": ctx["id"]}, sess)
+                    if fin:
+                        # COL-42 : tout lien de téléchargement cliqué par le moteur relevé (et retenu) avant le .wasm.
+                        chrome.send("Runtime.evaluate", {"expression": FIN_EARLY, "contextId": ctx["id"]}, sess)
                     chrome.send("Runtime.evaluate", {"expression": TIMING, "contextId": ctx["id"]}, sess)
         elif method == "Runtime.executionContextDestroyed":
             contexts.pop((sess, params.get("executionContextId")), None)
@@ -763,6 +781,8 @@ def run_scenario(name, site, csp, out_dir, chrome_bin, query=ENGINE_QUERY, expec
                 run_instances(chrome, page, contexts, result, errors)
             elif robust:
                 run_robustesse(chrome, page, contexts, result, errors)
+            elif fin:
+                run_finitions(chrome, page, contexts, result, errors)
             elif expect.get("accuse"):
                 run_accuse(chrome, page, (sess, ctx), contexts, result, errors, expect.get("sabotage", ""))
             elif host:
@@ -1543,7 +1563,7 @@ def check_envelopes(st, result, errors):
         if m.get("type") == "evora:ack" and ("re" not in keys or not isinstance(p.get("ok"), bool)
                                              or (p.get("ok") is False and "code" not in p)):
             errors.append(f"[ehp] accusé non conforme ({where}) : {p}")
-        if m.get("type") in ("evora:ready", "evora:dirty") and "re" in keys:
+        if m.get("type") in ("evora:ready", "evora:dirty", "evora:export", "evora:focus-out", "evora:commands") and "re" in keys:
             errors.append(f"[ehp] re inattendu ({where})")
         if m.get("type") == "evora:dirty" and not isinstance(p.get("dirty"), bool):
             errors.append(f"[ehp] evora:dirty non conforme ({where}) : {p}")
@@ -2252,6 +2272,521 @@ def run_chiffre(ev, page, engine, state, wait, settle, answer, saves, ctrl_s, pr
                       f"affiché : sonde {toast0} → {toast1}) ; mesure impossible")
 
 
+# Scénario « pont-finitions » (lot COL-FK-B2 : COL-42, COL-43 ; règle d'Evora du 2026-10-27 sur les ponts de
+# commandes, avenant §4). Un moteur (f1 ; window.name evora-f1) et l'observateur, un détecteur par finition :
+#  [fin-catalogue] evora:commands (command.catalog) émis après evora:init en français, conforme (champs, compte,
+#     empreinte FNV-1a 64 recalculée ici, libellés, chemins), liste blanche par construction : aucune commande des
+#     espaces de la coquille (file.*, create.*, app.*, help.*, prefs.*), aucune masquée, aucune de FIN_OFF ; témoins
+#     présents avec leur drapeau destructif (FIN_PRESENT) ; réémis après evora:lang (allemand), même empreinte, mêmes
+#     identifiants, libellés traduits. Le premier catalogue reçu est le commands.json de l'artefact ;
+#  [fin-liste-blanche] evora:command d'une commande hors catalogue (FIN_REFUSED) : {ok: false, code: capability} ;
+#  [fin-params] page.rotate avec des paramètres (dont une chaîne de chemin) : {ok: false, code: invalid_content} et
+#     aucun effet (aucun evora:dirty vrai) ; prémisse : page.rotate {} agit (evora:dirty vrai) ;
+#  [fin-destructive] page.delete sans confirmed : {ok: false, code: forbidden} et aucun effet ; avec confirmed: true :
+#     {ok: true} et le document modifié ;
+#  [fin-export] export.docx et export.html : un evora:export chacun (nom, type MIME du format, docRef du document de la
+#     coquille, octets), et AUCUN téléchargement du navigateur (FIN_EARLY relève tout lien de téléchargement cliqué
+#     dans le moteur, et le retient : rien ne part) ;
+#  [fin-focus-out] F6 sans modificateur, canevas du moteur au focus : un evora:focus-out {} ; Maj+F6 : rien ;
+#  [fin-signatures] signatures, paraphes, identités numériques et certificats jamais écrits dans le stockage : laissés
+#     par une séance précédente dans l'espace du compte (repère « SABORDAGE QA »), ils n'y sont plus après
+#     l'enregistrement des réglages qui suit evora:init (prémisse : réglages réécrits, auteur de la coquille).
+# Ses sept détecteurs, et eux seuls, rougissent sous le témoin groupé du lot COL-FK-B2 (défauts réintroduits dans le
+# moteur, puis retirés : FIN_EXPECTED).
+FIN_DOC = "01JX" + "F" * 20 + "D1"
+FIN_NAME = "evora-finitions.pdf"
+FIN_MARK = "SABORDAGE QA"
+FIN_EXPECTED = {"fin-catalogue", "fin-liste-blanche", "fin-params", "fin-destructive", "fin-export", "fin-focus-out",
+                "fin-signatures"}
+# Clés des réglages du moteur qui portent l'identité du membre (écrites ici, indépendamment du moteur).
+FIN_IDENTITY = ("signature", "signature_text", "signature_image", "initials", "sign_graphic", "digital_ids", "trusted")
+# Espaces de noms de la coquille, refusés en bloc (avenant §4, règle 1).
+FIN_SHELL = ("file", "create", "app", "help", "prefs")
+# Commandes masquées (COL-05, COL-10, OCR, Q47 a), écrites ici indépendamment de crates/ui-egui/src/evora.rs.
+FIN_MASKED = ("help.github", "help.check_updates", "sign.digital", "sign.certify", "sign.certify_invisible",
+              "sign.timestamp", "redact.mark", "redact.apply", "redact.sanitize", "ocr.recognize", "ocr.recognize_batch",
+              "actions.wizard", "file.open_recent", "comment.import", "form.import_data", "tools.js_console",
+              "edit.edit_text", "protect.remove_hidden")
+# Hors catalogue : un document neuf fait des fichiers de l'ordinateur ; le thème est celui de la coquille.
+FIN_OFF = ("page.combine", "view.theme", "view.theme.system", "view.theme.light", "view.theme.dark")
+# Témoins du catalogue : présents, avec ce drapeau destructif.
+FIN_PRESENT = {"page.rotate": False, "page.delete": True, "form.clear": True, "comment.flatten": True,
+               "export.docx": False, "export.html": False, "comment.export": False, "edit.undo": False,
+               "print.dialog": False}
+FIN_REFUSED = ("file.save", "file.close", "file.revert", "help.about", "app.preferences", "create.blank", "page.combine",
+               "view.theme.dark", "redact.mark", "sign.digital", "evora.inconnue")
+FIN_EXPORTS = (("export.docx", ".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+               ("export.html", ".html", "text/html"))
+FIN_BAD_PARAMS = ({"pages": "1"}, {"cible": "/opfs/evora/document.pdf"})
+FIN_PARAMS_SCHEMA = {"type": "object", "maxProperties": 0}
+COMMAND_RE = re.compile(r"^[a-z][A-Za-z0-9_.-]*$")
+HASH_RE = re.compile(r"^[0-9a-f]{16}$")
+LANG_RE = re.compile(r"^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*$")
+FIN_HARNESS = """
+const ENGINE = "%(engine)s";
+const A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+let n = 0;
+const ulid = () => { n += 1; return "01JZZZZZZZZZZZZZZZZZZZZZ" + A[(n >> 5) %% 32] + A[n %% 32]; };
+const PDF = "%(pdf)s";
+const plainObject = (x) => x !== null && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype;
+const copy = (p) => JSON.parse(JSON.stringify(p, (k, v) => v instanceof ArrayBuffer ? {byteLength: v.byteLength} : v));
+const frame = document.getElementById("f1");
+const observer = document.getElementById("observer");
+const st = window.__evoraFin = {ready: null, caps: [], log: [], obs: {}, stray: []};
+const post = (type, payload, re, transfer) => {
+  const id = ulid();
+  const m = {v: 1, type, id, payload};
+  if (re) m.re = re;
+  st.log.push({sent: true, type, id, re: re || null, payload: copy(payload)});
+  frame.contentWindow.postMessage(m, ENGINE, transfer || []);
+  return id;
+};
+addEventListener("message", (e) => {
+  const d = e.data;
+  if (e.source === observer.contentWindow && e.origin === ENGINE) {
+    if (plainObject(d) && typeof d.probe === "string") st.obs[d.probe] = {all: d.all, engine: d.engine};
+    return;
+  }
+  if (e.source !== frame.contentWindow || e.origin !== ENGINE || !plainObject(d) || d.v !== 1) {
+    st.stray.push({origin: e.origin, type: plainObject(d) ? d.type : null});
+    return;
+  }
+  const binary = {};
+  if (plainObject(d.payload)) for (const k of Object.keys(d.payload)) {
+    const x = d.payload[k];
+    if (x !== null && typeof x === "object" && !Array.isArray(x) && !plainObject(x))
+      binary[k] = {kind: Object.prototype.toString.call(x), byteLength: typeof x.byteLength === "number" ? x.byteLength : null};
+  }
+  st.log.push({v: d.v, keys: Object.keys(d), type: d.type, id: d.id, re: "re" in d ? d.re : null,
+               payloadPlain: plainObject(d.payload), payload: plainObject(d.payload) ? copy(d.payload) : null, binary});
+  if (d.type === "evora:ready" && !st.ready) {
+    st.ready = d.id;
+    st.caps = Array.isArray(d.payload && d.payload.capabilities) ? d.payload.capabilities : [];
+  }
+  // Comme la coquille : un export est déposé dans Drive puis acquitté (§7.4), un enregistrement est acquitté.
+  if (d.type === "evora:export") post("evora:ack", {ok: true}, d.id);
+  if (d.type === "evora:save") post("evora:saved", {ok: true, version: 2}, d.id);
+});
+window.__finInit = (ns) => st.ready ? post("evora:init", {lang: "fr", engineLang: "fr", theme: "dark", accent: "#4F46E5",
+  readOnly: false, storageNs: ns, displayName: "Compte Evora", capabilities: st.caps, prefs: {},
+  limits: {maxDocumentBytes: 1048576, maxExportBytes: 1048576}}, st.ready) : null;
+window.__finOpen = (docRef) => {
+  const bytes = Uint8Array.from(atob(PDF), (c) => c.charCodeAt(0)).buffer;
+  return post("evora:open", {docRef, name: "%(name)s", bytes}, null, [bytes]);
+};
+window.__finCommand = (command, params, confirmed) => {
+  const payload = {command, params};
+  if (confirmed !== null) payload.confirmed = confirmed;
+  return post("evora:command", payload);
+};
+window.__finSend = (type, payload, re) => post(type, payload, re);
+"""
+FIN_STATE = "JSON.stringify(window.__evoraFin || {})"
+# Posé dès la création du contexte de chaque document de l'origine moteur, avant le .wasm : tout lien de
+# téléchargement cliqué (HTMLElement.prototype.click d'un <a download>) est relevé, et retenu (le navigateur ne
+# télécharge rien, et la page sabordée de l'iframe ne journalise aucune erreur). Autotest : un clic du banc relevé.
+FIN_EARLY = """(() => {
+  if (window.__evoraFinEarly) return "déjà posé";
+  const fin = window.__evoraFinEarly = {downloads: [], selftest: 0};
+  const click = HTMLElement.prototype.click;
+  let bench = false;
+  HTMLElement.prototype.click = function () {
+    if (this instanceof HTMLAnchorElement && this.hasAttribute("download")) {
+      if (bench) fin.selftest += 1; else fin.downloads.push({name: String(this.download), href: String(this.href).slice(0, 40)});
+      return undefined;
+    }
+    return click.call(this);
+  };
+  bench = true;
+  try {
+    const a = document.createElement("a");
+    a.href = "data:text/plain,SABORDAGE%20QA";
+    a.download = "evora-autotest.txt";
+    a.click();
+  } finally { bench = false; }
+  return "posé";
+})()"""
+FIN_F6 = """((shift) => { const c = document.getElementById("pdfcraft");
+  for (const type of ["keydown", "keyup"]) {
+    c.dispatchEvent(new KeyboardEvent(type, {key: "F6", code: "F6", shiftKey: shift, bubbles: true, cancelable: true}));
+  }
+  return document.activeElement === c; })(%s)"""
+
+
+def parent_page_fin(query):
+    """Page parente du scénario « pont-finitions » : un moteur et l'observateur."""
+    harness = FIN_HARNESS % {"engine": ENGINE_ORIGIN, "pdf": base64.b64encode(two_page_pdf()).decode(), "name": FIN_NAME}
+    return f"""<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>Evora smoke : finitions du pont</title></head>
+<body style="margin:0;background:#fff">
+<iframe id="f1" name="evora-f1" src="{ENGINE_ORIGIN}/index.html{query}" width="{IFRAME_W}" height="{IFRAME_H}"
+ style="border:0;display:block" sandbox="allow-scripts allow-same-origin"></iframe>
+<iframe id="observer" src="{ENGINE_ORIGIN}/__evora-observer.html" width="10" height="10" style="border:0;display:block"></iframe>
+<script>
+window.__evoraMessages = [];
+addEventListener("message", (e) => {{
+  const d = e.data;
+  window.__evoraMessages.push({{origin: e.origin, type: (d && typeof d === "object" && typeof d.type === "string") ? d.type : null}});
+}});
+{harness}
+</script>
+</body></html>
+""".encode()
+
+
+def fin_hash(commands):
+    """Empreinte du catalogue (§9.1) recalculée ici : FNV-1a 64 de chaque identifiant, d'un octet nul et de son
+    drapeau destructif (« 1 » ou « 0 »), et d'un saut de ligne, dans l'ordre du catalogue."""
+    h = 0xCBF29CE484222325
+    for c in commands:
+        flag = b"1" if isinstance(c, dict) and c.get("destructive") is True else b"0"
+        for byte in str(c.get("id") if isinstance(c, dict) else "").encode() + b"\x00" + flag + b"\n":
+            h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"{h:016x}"
+
+
+def judge_catalog(p, lang):
+    """Les écarts d'un evora:commands à la norme (§9.1) et à la règle de liste blanche (avenant §4)."""
+    if not isinstance(p, dict):
+        return ["catalogue absent"]
+    problems = []
+    if not {"lang", "count", "hash", "commands"} <= set(p) <= {"lang", "count", "hash", "params", "commands"}:
+        problems.append(f"champs {sorted(p)}")
+    cmds = p.get("commands")
+    if not isinstance(cmds, list) or not cmds:
+        return problems + [f"liste de commandes vide ou absente ({type(cmds).__name__})"]
+    if p.get("lang") != lang or not LANG_RE.match(str(p.get("lang"))):
+        problems.append(f"langue {p.get('lang')!r} (attendue : {lang!r})")
+    if p.get("count") != len(cmds):
+        problems.append(f"count {p.get('count')!r} pour {len(cmds)} commandes")
+    if not HASH_RE.match(str(p.get("hash"))):
+        problems.append(f"empreinte mal formée {p.get('hash')!r}")
+    elif p["hash"] != fin_hash(cmds):
+        problems.append(f"empreinte {p['hash']} (recalculée : {fin_hash(cmds)})")
+    if "params" in p and p["params"] != FIN_PARAMS_SCHEMA:
+        problems.append(f"schéma des paramètres {p['params']!r} (attendu : aucun paramètre)")
+    ids = [c.get("id") if isinstance(c, dict) else None for c in cmds]
+    if len(set(map(str, ids))) != len(ids):
+        problems.append("identifiants en double")
+    bad = []
+    for c in cmds:
+        if not isinstance(c, dict):
+            bad.append(repr(c)[:40])
+            continue
+        if not {"id", "label", "enabled", "destructive"} <= set(c) <= {"id", "label", "path", "enabled", "destructive"}:
+            bad.append(f"{c.get('id')}: champs {sorted(c)}")
+        cid, label = c.get("id"), c.get("label")
+        if not isinstance(cid, str) or len(cid) > 100 or not COMMAND_RE.match(cid):
+            bad.append(f"identifiant {cid!r}")
+        if not isinstance(label, str) or not 1 <= len(label.encode("utf-16-le")) // 2 <= 200:
+            bad.append(f"{cid}: libellé {label!r}")
+        if not isinstance(c.get("enabled"), bool) or not isinstance(c.get("destructive"), bool):
+            bad.append(f"{cid}: drapeaux {c.get('enabled')!r} {c.get('destructive')!r}")
+        path = c.get("path", [])
+        if not isinstance(path, list) or len(path) > 8 or not all(isinstance(x, str) and 1 <= len(x) <= 200 for x in path):
+            bad.append(f"{cid}: chemin {path!r}")
+    if bad:
+        problems.append(f"entrées non conformes : {bad[:6]}")
+    shell = [i for i in ids if isinstance(i, str) and i.split(".", 1)[0] in FIN_SHELL]
+    masked = [i for i in ids if i in FIN_MASKED]
+    off = [i for i in ids if i in FIN_OFF]
+    if shell:
+        problems.append(f"commandes de la coquille dans le catalogue (hors liste blanche) : {shell[:8]}")
+    if masked:
+        problems.append(f"commandes masquées dans le catalogue : {masked[:8]}")
+    if off:
+        problems.append(f"commandes hors catalogue présentes : {off}")
+    flags = {c.get("id"): c.get("destructive") for c in cmds if isinstance(c, dict)}
+    wrong = {i: flags.get(i) for i, d in FIN_PRESENT.items() if flags.get(i) is not d}
+    if wrong:
+        problems.append(f"témoins du catalogue absents ou mal marqués (reçu ; attendu {FIN_PRESENT}) : {wrong}")
+    return problems
+
+
+def fin_selftest():
+    """Le juge du catalogue se tait sur un catalogue sain et signale chaque défaut connu."""
+    good = [{"id": i, "label": i, "path": ["Menu"], "enabled": True, "destructive": d} for i, d in FIN_PRESENT.items()]
+    sane = {"lang": "fr", "count": len(good), "hash": fin_hash(good), "params": dict(FIN_PARAMS_SCHEMA), "commands": good}
+    shell = good + [{"id": "file.save", "label": "Save", "enabled": True, "destructive": False}]
+    masked = good + [{"id": "redact.mark", "label": "Redact", "enabled": True, "destructive": False}]
+    flat = [dict(c, destructive=False) for c in good]
+    cases = [dict(sane, commands=shell, count=len(shell), hash=fin_hash(shell)),
+             dict(sane, commands=masked, count=len(masked), hash=fin_hash(masked)),
+             dict(sane, commands=flat, count=len(flat), hash=fin_hash(flat)),
+             dict(sane, hash="0" * 16), dict(sane, count=1), dict(sane, lang="de"), dict(sane, params={"type": "object"})]
+    return judge_catalog(sane, "fr") == [] and all(judge_catalog(c, "fr") for c in cases) and judge_catalog(None, "fr")
+
+
+def run_finitions(chrome, page, contexts, result, errors):
+    """COL-42 et COL-43 (lot COL-FK-B2) : un détecteur par finition (voir FIN_EXPECTED et l'en-tête du scénario)."""
+    own = NS_PREFIX + NS_OWN
+    fin = result.setdefault("finitions", {})
+
+    def ev(expr, session, context=None, gesture=False):
+        return cdp_evaluate(chrome, expr, session, context, gesture)
+
+    def state():
+        return json.loads(ev(FIN_STATE, page) or "{}")
+
+    def wait(cond, timeout=30.0):
+        end = time.monotonic() + timeout
+        st = state()
+        while not cond(st) and time.monotonic() < end:
+            chrome.pump(0.2)
+            st = state()
+        return st
+
+    def settle(seconds):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            chrome.pump(0.1)
+
+    def received(st, after=-1, kind=None):
+        return [m for i, m in enumerate(st.get("log", [])) if i > after and not m.get("sent")
+                and (kind is None or m.get("type") == kind)]
+
+    def answer(st, rid):
+        return next((m for m in received(st) if rid and m.get("re") == rid), None)
+
+    def ack_payload(st, rid):
+        m = answer(st, rid)
+        return (m.get("payload") or {}) if m and m.get("type") == "evora:ack" else None
+
+    def mark():
+        return len(state().get("log", [])) - 1
+
+    def dirty(st, after, value):
+        return [m for m in received(st, after, "evora:dirty") if (m.get("payload") or {}).get("dirty") is value]
+
+    def command(cmd, params, confirmed=None, timeout=15.0):
+        rid = ev(f"window.__finCommand({json.dumps(cmd)}, {json.dumps(params)}, {json.dumps(confirmed)})", page)
+        st = wait(lambda s: answer(s, rid) is not None, timeout)
+        return rid, ack_payload(st, rid)
+
+    def engine():
+        for (sess, ctx), origin in list(contexts.items()):
+            if origin != ENGINE_ORIGIN:
+                continue
+            try:
+                name = ev("window.name", sess, ctx)
+                probe = json.loads(ev(PROBE, sess, ctx) or "{}")
+            except (RuntimeError, TimeoutError):
+                continue
+            if name == "evora-f1" and probe.get("canvas") and probe.get("cw", 0) > 0 and probe.get("w") != 300:
+                return sess, ctx
+        return None
+
+    def reopen(label):
+        m = mark()
+        rid = ev(f"window.__finOpen({json.dumps(FIN_DOC)})", page)
+        st = wait(lambda s: answer(s, rid) is not None and dirty(s, m, False), 20)
+        fin[f"ouverture_{label}"] = {"accuse": ack_payload(st, rid), "dirty_faux": len(dirty(st, m, False))}
+        if ack_payload(st, rid) != {"ok": True} or not dirty(st, m, False):
+            errors.append(f"[banc] ouverture du document de la coquille ({label}) : accusé {ack_payload(st, rid)}, "
+                          f"evora:dirty {{dirty: false}} reçus {len(dirty(st, m, False))} (attendu : {{ok: true}}, puis 1)")
+            return False
+        return True
+
+    if not fin_selftest():
+        errors.append("[banc] juge du catalogue muet : un défaut connu n'est pas signalé (autotest)")
+    end = time.monotonic() + READY_TIMEOUT
+    found = engine()
+    while found is None and time.monotonic() < end:
+        chrome.pump(0.5)
+        found = engine()
+    st = wait(lambda s: s.get("ready"))
+    if found is None or not st.get("ready"):
+        errors.append(f"[banc] moteur prêt : {found is not None}, evora:ready reçu : {bool(st.get('ready'))}")
+        return
+    sess, ctx = found
+    early = json.loads(ev("JSON.stringify(window.__evoraFinEarly || null)", sess, ctx) or "null")
+    fin["instrument_telechargements"] = early
+    if not early or early.get("selftest") != 1:
+        errors.append(f"[banc] instrument des téléchargements absent ou muet : {early}")
+        return
+
+    # Une séance précédente du même compte a laissé signatures, paraphes, identités et certificats dans son espace.
+    seeded = {"author": "Ancien nom", "language": "ja", "reload_changed_files": False,
+              "signature": {"strokes": [[[0, 0], [10, 10]]], "note": FIN_MARK}, "signature_text": FIN_MARK,
+              "signature_image": None, "initials": {"note": FIN_MARK}, "sign_graphic": FIN_MARK,
+              "digital_ids": [{"path": FIN_MARK, "name": FIN_MARK}], "trusted": [FIN_MARK]}
+    fin["seme"] = ev(SEED % json.dumps([[own, json.dumps(seeded)]]), sess, ctx)
+    m0 = mark()
+    init = ev(f"window.__finInit({json.dumps(NS_OWN)})", page)
+    st = wait(lambda s: answer(s, init) is not None, 15)
+    if ack_payload(st, init) != {"ok": True}:
+        errors.append(f"[banc] accusé d'evora:init {ack_payload(st, init)} (attendu : {{ok: true}})")
+        return
+    fin["capacites"] = st.get("caps")
+
+    # [fin-catalogue], en français : le premier catalogue reçu est le commands.json de l'artefact.
+    st = wait(lambda s: received(s, m0, "evora:commands"), 20)
+    first = received(st, m0, "evora:commands")
+    cat_fr = (first[0].get("payload") or {}) if first else None
+    problems = judge_catalog(cat_fr, "fr")
+    fin["catalogue_fr"] = {"recus": len(first), "compte": (cat_fr or {}).get("count"), "empreinte": (cat_fr or {}).get("hash"),
+                           "ecarts": problems}
+    if cat_fr and os.environ.get("EVORA_COMMANDS_OUT"):
+        with open(os.environ["EVORA_COMMANDS_OUT"], "w", encoding="utf-8") as fh:
+            json.dump(cat_fr, fh, ensure_ascii=False, indent=1)
+        fin["catalogue_fr"]["ecrit"] = os.environ["EVORA_COMMANDS_OUT"]
+    if problems:
+        errors.append(f"[fin-catalogue] evora:commands après evora:init : {'; '.join(problems)}")
+
+    # Le document de la coquille (deux pages).
+    if not reopen("initiale"):
+        return
+
+    # [fin-signatures] : l'enregistrement des réglages qui suit (perte de focus) les laisse hors du stockage.
+    focus = ev(FOCUS, sess, ctx, gesture=True)
+    settle(0.3)
+    ev(BLUR, sess, ctx, gesture=True)
+    raw, saved = None, None
+    end = time.monotonic() + 8.0
+    while time.monotonic() < end:
+        settle(0.5)
+        raw = ev(f"localStorage.getItem({json.dumps(own)})", sess, ctx)
+        try:
+            saved = json.loads(raw) if raw else None
+        except ValueError:
+            saved = None
+        if isinstance(saved, dict) and saved.get("author") == "Compte Evora":
+            break
+    kept = [k for k in FIN_IDENTITY if isinstance(saved, dict) and k in saved]
+    fin["signatures"] = {"focus": focus, "auteur": saved.get("author") if isinstance(saved, dict) else None,
+                         "cles_identite_restees": kept, "repere_present": bool(raw and FIN_MARK in raw)}
+    if not isinstance(saved, dict) or saved.get("author") != "Compte Evora":
+        errors.append(f"[banc] réglages du compte non réécrits après evora:init (auteur {fin['signatures']['auteur']!r}) : "
+                      "le contrôle des signatures ne peut pas rougir")
+    elif kept or FIN_MARK in raw:
+        errors.append(f"[fin-signatures] réglages écrits avec l'identité du membre : clés {kept}, repère "
+                      f"« {FIN_MARK} » {'présent' if FIN_MARK in raw else 'absent'} (attendu : aucune)")
+
+    # [fin-catalogue], en allemand : réémis, même empreinte, mêmes identifiants, libellés traduits.
+    m1 = mark()
+    lang = ev("window.__finSend('evora:lang', {lang: 'de', engineLang: 'de'})", page)
+    st = wait(lambda s: answer(s, lang) is not None and received(s, m1, "evora:commands"), 20)
+    second = received(st, m1, "evora:commands")
+    cat_de = (second[0].get("payload") or {}) if second else None
+    problems = judge_catalog(cat_de, "de")
+    if cat_fr and cat_de:
+        ids_fr = [c.get("id") for c in cat_fr.get("commands") or [] if isinstance(c, dict)]
+        ids_de = [c.get("id") for c in cat_de.get("commands") or [] if isinstance(c, dict)]
+        labels_fr = {c.get("id"): c.get("label") for c in cat_fr.get("commands") or [] if isinstance(c, dict)}
+        moved = sum(1 for c in cat_de.get("commands") or [] if isinstance(c, dict) and labels_fr.get(c.get("id")) != c.get("label"))
+        if cat_de.get("hash") != cat_fr.get("hash") or ids_de != ids_fr:
+            problems.append(f"catalogue allemand d'une autre identité (empreinte {cat_de.get('hash')} contre {cat_fr.get('hash')})")
+        if moved == 0:
+            problems.append("aucun libellé traduit en allemand")
+        fin["catalogue_de"] = {"empreinte": cat_de.get("hash"), "libelles_traduits": moved}
+    if problems:
+        errors.append(f"[fin-catalogue] evora:commands après evora:lang (de) : {'; '.join(problems)}")
+
+    # [fin-export] : chaque export part vers la coquille, avec le type MIME de son format ; rien n'est téléchargé.
+    exports = fin.setdefault("exports", [])
+    why = []
+    for cmd, ext, mime in FIN_EXPORTS:
+        m = mark()
+        rid, ack_cmd = command(cmd, {})
+        st = wait(lambda s: received(s, m, "evora:export"), 15)
+        sent = received(st, m, "evora:export")
+        p = (sent[0].get("payload") or {}) if sent else {}
+        b = (sent[0].get("binary") or {}).get("bytes") or {} if sent else {}
+        exports.append({"commande": cmd, "accuse": ack_cmd, "exports": len(sent), "nom": p.get("name"), "mime": p.get("mime"),
+                        "docRef": p.get("docRef"), "octets": b.get("byteLength")})
+        if ack_cmd != {"ok": True}:
+            why.append(f"{cmd} : accusé {ack_cmd}")
+        if len(sent) != 1:
+            why.append(f"{cmd} : {len(sent)} evora:export (attendu : 1)")
+        elif (not str(p.get("name", "")).endswith(ext) or p.get("mime") != mime or p.get("docRef") != FIN_DOC
+              or b.get("kind") != "[object ArrayBuffer]" or not (b.get("byteLength") or 0) >= 1):
+            why.append(f"{cmd} : evora:export {{nom {p.get('name')!r}, mime {p.get('mime')!r}, docRef {p.get('docRef')!r}, "
+                       f"octets {b}}} (attendu : *{ext}, {mime}, {FIN_DOC})")
+    settle(1.0)
+    early = json.loads(ev("JSON.stringify(window.__evoraFinEarly || null)", sess, ctx) or "null") or {}
+    fin["telechargements"] = early.get("downloads")
+    if early.get("downloads"):
+        why.append(f"téléchargements du navigateur demandés par le moteur : {early.get('downloads')}")
+    if why:
+        errors.append(f"[fin-export] {'; '.join(why)}")
+
+    # [fin-params] : des paramètres, et surtout un chemin, sont refusés sans effet ; prémisse : page.rotate {} agit.
+    if not reopen("parametres"):
+        return
+    m = mark()
+    refused = [command("page.rotate", params)[1] for params in FIN_BAD_PARAMS]
+    settle(2.0)
+    early_dirty = dirty(state(), m, True)
+    m2 = mark()
+    ok_rotate = command("page.rotate", {})[1]
+    st = wait(lambda s: dirty(s, m2, True), 10)
+    fin["parametres"] = {"refus": refused, "dirty_vrai_apres_refus": len(early_dirty), "rotation_sans_parametre": ok_rotate,
+                         "dirty_vrai_apres_rotation": len(dirty(st, m2, True))}
+    if any(r != {"ok": False, "code": "invalid_content"} for r in refused) or early_dirty:
+        errors.append(f"[fin-params] page.rotate avec {list(FIN_BAD_PARAMS)} : accusés {refused}, document modifié "
+                      f"{bool(early_dirty)} (attendu : invalid_content, sans effet)")
+    elif ok_rotate != {"ok": True} or not dirty(st, m2, True):
+        errors.append(f"[fin-params] page.rotate {{}} : accusé {ok_rotate}, document modifié {bool(dirty(st, m2, True))} "
+                      "(attendu : {ok: true}, puis evora:dirty vrai)")
+
+    # [fin-destructive] : page.delete sans confirmed refusé sans effet ; avec confirmed: true, exécuté.
+    if not reopen("destructive"):
+        return
+    m = mark()
+    _, unconfirmed = command("page.delete", {})
+    settle(2.0)
+    early_dirty = dirty(state(), m, True)
+    m2 = mark()
+    _, confirmed = command("page.delete", {}, True)
+    st = wait(lambda s: dirty(s, m2, True), 10)
+    fin["destructive"] = {"sans_confirmation": unconfirmed, "dirty_vrai_apres_refus": len(early_dirty),
+                          "avec_confirmation": confirmed, "dirty_vrai_apres": len(dirty(st, m2, True))}
+    if unconfirmed != {"ok": False, "code": "forbidden"} or early_dirty:
+        errors.append(f"[fin-destructive] page.delete sans confirmed : accusé {unconfirmed}, document modifié "
+                      f"{bool(early_dirty)} (attendu : forbidden, sans effet)")
+    elif confirmed != {"ok": True} or not dirty(st, m2, True):
+        errors.append(f"[fin-destructive] page.delete avec confirmed : accusé {confirmed}, document modifié "
+                      f"{bool(dirty(st, m2, True))} (attendu : {{ok: true}}, puis evora:dirty vrai)")
+
+    # [fin-focus-out] : F6 rend le clavier à la coquille ; Maj+F6 ne le rend pas.
+    focus = ev(FOCUS, sess, ctx, gesture=True)
+    settle(0.3)
+    m = mark()
+    ev(FIN_F6 % "false", sess, ctx, gesture=True)
+    st = wait(lambda s: received(s, m, "evora:focus-out"), 5)
+    plain = received(st, m, "evora:focus-out")
+    ev(FIN_F6 % "true", sess, ctx, gesture=True)
+    settle(1.5)
+    after_shift = received(state(), m, "evora:focus-out")
+    fin["sortie_clavier"] = {"focus": focus, "f6": [x.get("payload") for x in plain], "apres_maj_f6": len(after_shift)}
+    if focus is not True:
+        errors.append("[banc] le canevas du moteur n'a pas pris le focus : sortie clavier non mesurable")
+    elif len(plain) != 1 or plain[0].get("payload") != {} or plain[0].get("re") is not None or len(after_shift) != 1:
+        errors.append(f"[fin-focus-out] F6 : {len(plain)} evora:focus-out {[x.get('payload') for x in plain]}, puis "
+                      f"{len(after_shift)} après Maj+F6 (attendu : un evora:focus-out {{}}, et rien de plus)")
+
+    # [fin-liste-blanche], en dernier : une commande hors catalogue n'est jamais exécutée.
+    answers = {cmd: command(cmd, {})[1] for cmd in FIN_REFUSED}
+    fin["hors_catalogue"] = answers
+    wrong = {c: a for c, a in answers.items() if a != {"ok": False, "code": "capability"}}
+    if wrong:
+        errors.append(f"[fin-liste-blanche] commandes hors catalogue exécutées ou mal refusées : {wrong} "
+                      "(attendu : {ok: false, code: capability})")
+
+    # Enveloppes et charges utiles de tout ce que le moteur a envoyé (§3, §4.4, §4.5, §9.1).
+    st = state()
+    for msg in received(st):
+        rule = PAYLOAD_KEYS.get(msg.get("type"))
+        p = msg.get("payload") or {}
+        if msg.get("v") != 1 or not msg.get("payloadPlain") or rule is None or not rule[0] <= set(p) <= rule[1] \
+                or not ULID_RE.match(str(msg.get("id"))) or (msg.get("re") is not None and not ULID_RE.match(str(msg.get("re")))):
+            errors.append(f"[ehp] message du moteur non conforme : {msg.get('type')} {sorted(p)}")
+    if st.get("stray"):
+        errors.append(f"[ehp] messages d'une autre source ou malformés reçus par la page parente : {st['stray'][:5]}")
+    fin["messages"] = [{k: x.get(k) for k in ("sent", "type", "re", "payload")} for x in st.get("log", [])
+                       if x.get("type") != "evora:commands"][-40:]
+
+
 def error_tags(errors):
     return {m.group(1) for m in (re.match(r"^\[([^\]]+)\]", e) for e in errors) if m}
 
@@ -2331,6 +2866,10 @@ def main(argv):
                      + urllib.parse.quote("|".join((ROB_TOAST, ROB_ENC_PROBE, ROB_LOCAL_PROBE)), safe=""))
         results.append(run_scenario("pont-robustesse", site, engine_csp(hashes), out_dir, chrome_bin, rob_query,
                                     {"ehp": True, "robustesse": True}))
+        # COL-42 et COL-43 : export vers Drive, sortie clavier, signatures jamais écrites, catalogue de commandes
+        # en liste blanche ; ses détecteurs rougissent sous le témoin groupé du lot COL-FK-B2.
+        results.append(run_scenario("pont-finitions", site, engine_csp(hashes), out_dir, chrome_bin,
+                                    "?host=evora&evora-audit=1", {"ehp": True, "finitions": True}))
         # COL-05, COL-10, OCR, Q47 (a) : masquages vus au rendu sur les surfaces du démarrage, et leurs
         # témoins (tests/evora_masks.rs juge toutes les autres surfaces).
         masks_query = (f"{ENGINE_QUERY}{sep}evora-probe="
@@ -2402,6 +2941,12 @@ def main(argv):
                 log(f"- {r['scenario']} : étiquettes rouges : {sorted(error_tags(r['errors']))} "
                     f"(sous le témoin groupé du lot COL-FK-B1, attendues : {sorted(ROB_EXPECTED)} ; sous celui de "
                     f"sa correction 1 : {sorted(ROB_FIX_EXPECTED)})")
+            if "finitions" in r:
+                log(f"- {r['scenario']} : finitions du pont (COL-42, COL-43) : "
+                    + json.dumps({k: v for k, v in r["finitions"].items() if k != "messages"}, ensure_ascii=False)[:3200])
+                log(f"- {r['scenario']} : échanges (fin) : " + json.dumps(r["finitions"].get("messages", []), ensure_ascii=False)[:2400])
+                log(f"- {r['scenario']} : étiquettes rouges : {sorted(error_tags(r['errors']))} "
+                    f"(sous le témoin groupé du lot COL-FK-B2, attendues : {sorted(FIN_EXPECTED)})")
             if "witness_ok" in r:
                 log(f"- {r['scenario']} : témoin sabordé ({r['sabotage_desc']}) ; "
                     f"détecteurs déclenchés {r['tags']} ; attendus {r['expected_red']} ; "
